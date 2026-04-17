@@ -74,16 +74,27 @@ private final class LottieHostView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-    }
-
-    fileprivate func applyPlaybackLayout(to view: LottieAnimationView) {
-        view.contentMode = .scaleAspectFit
-        view.maskAnimationToBounds = false
+        clipsToBounds = true
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// 让 Lottie 视图始终占满宿主 bounds；实际的 aspect-fit 由 Lottie 的 `contentMode` 完成。
+    override func layout() {
+        super.layout()
+        player?.frame = bounds
+    }
+
+    private func configurePlayer(_ v: LottieAnimationView) {
+        v.loopMode = .loop
+        v.contentMode = .scaleAspectFit
+        v.maskAnimationToBounds = true
+        v.translatesAutoresizingMaskIntoConstraints = true
+        v.autoresizingMask = [.width, .height]
+        v.frame = bounds
     }
 
     func clear() {
@@ -95,17 +106,10 @@ private final class LottieHostView: NSView {
     func loadJSON(path: String, onLoaded: @escaping (LottieAnimation) -> Void, onError: @escaping (String) -> Void) {
         clear()
         let v = LottieAnimationView(filePath: path)
-        v.translatesAutoresizingMaskIntoConstraints = false
-        v.loopMode = .loop
-        applyPlaybackLayout(to: v)
+        configurePlayer(v)
         addSubview(v)
-        NSLayoutConstraint.activate([
-            v.leadingAnchor.constraint(equalTo: leadingAnchor),
-            v.trailingAnchor.constraint(equalTo: trailingAnchor),
-            v.topAnchor.constraint(equalTo: topAnchor),
-            v.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
         player = v
+        needsLayout = true
         if let anim = v.animation {
             onLoaded(anim)
             v.play()
@@ -124,8 +128,8 @@ private final class LottieHostView: NSView {
                     onError(error.localizedDescription)
                     return
                 }
-                view.loopMode = .loop
-                self.applyPlaybackLayout(to: view)
+                self.configurePlayer(view)
+                self.needsLayout = true
                 if let anim = view.animation {
                     onLoaded(anim)
                     view.play()
@@ -134,16 +138,10 @@ private final class LottieHostView: NSView {
                 }
             }
         }
-        v.translatesAutoresizingMaskIntoConstraints = false
-        applyPlaybackLayout(to: v)
+        configurePlayer(v)
         addSubview(v)
-        NSLayoutConstraint.activate([
-            v.leadingAnchor.constraint(equalTo: leadingAnchor),
-            v.trailingAnchor.constraint(equalTo: trailingAnchor),
-            v.topAnchor.constraint(equalTo: topAnchor),
-            v.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
         player = v
+        needsLayout = true
     }
 
     var lottieView: LottieAnimationView? { player }
@@ -207,8 +205,6 @@ private struct LottieHostRepresentable: NSViewRepresentable {
 
         guard let lv = nsView.lottieView else { return }
 
-        nsView.applyPlaybackLayout(to: lv)
-
         if isPlaying {
             if !lv.isAnimationPlaying {
                 lv.play()
@@ -248,8 +244,6 @@ private final class LottieToolModel {
     var hint = "将 lottie.json 或 .lottie 文件拖入下方区域，或点击「来个 DEMO」。"
     var errorMessage: String?
     var fileInfo: LottieFileInfo?
-    /// 动画宽高比，用于驱动预览区自适应高度；nil 时用默认高度。
-    var animationAspectRatio: CGFloat?
 
     var hasFile: Bool { filePath != nil }
 
@@ -268,7 +262,6 @@ private final class LottieToolModel {
         isPlaying = true
         exportPNGTicket = 0
         fileInfo = nil
-        animationAspectRatio = nil
     }
 
     func loadURL(_ url: URL) {
@@ -302,7 +295,6 @@ private final class LottieToolModel {
             isPlaying = true
             hint = "内置 DEMO（旋转圆形）"
             fileInfo = nil
-            animationAspectRatio = nil
         } catch {
             errorMessage = "无法写入临时文件：\(error.localizedDescription)"
         }
@@ -337,9 +329,6 @@ private final class LottieToolModel {
             schemaVersion: v,
             fileSizeBytes: bytes
         )
-        if let pw = w, let ph = h, pw > 0, ph > 0 {
-            animationAspectRatio = CGFloat(ph) / CGFloat(pw)
-        }
         errorMessage = nil
     }
 }
@@ -348,23 +337,14 @@ private final class LottieToolModel {
 
 struct LottieToolView: View {
     private let infoWidth: CGFloat = 248
-    private let defaultPreviewHeight: CGFloat = 400
-    private let minPreviewHeight: CGFloat = 240
-    private let maxPreviewHeight: CGFloat = 1200
+    /// 外层拖放命中区（固定）。
+    private let previewSlotSide: CGFloat = 800
+    /// 实际 Lottie 渲染视图略小，留出边距，配合 aspectFit 减少「画不满 / 被裁切」观感。
+    private let lottiePlaybackSide: CGFloat = 560
 
     @State private var model = LottieToolModel()
     @State private var frameFieldText = ""
     @State private var dropTargeted = false
-    @State private var previewContainerWidth: CGFloat = 0
-
-    /// 根据动画真实宽高比，把容器宽度映射为渲染高度，使动画恰好完整显示。
-    private var previewHeight: CGFloat {
-        guard let ratio = model.animationAspectRatio, previewContainerWidth > 0 else {
-            return defaultPreviewHeight
-        }
-        let h = previewContainerWidth * ratio
-        return min(max(h, minPreviewHeight), maxPreviewHeight)
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -451,18 +431,10 @@ struct LottieToolView: View {
             HStack(alignment: .top, spacing: 14) {
                 previewSlot
                     .zIndex(0)
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(key: PreviewWidthKey.self, value: geo.size.width)
-                        }
-                    )
 
                 lottieInfoPanel
                     .frame(width: infoWidth, alignment: .topLeading)
                     .zIndex(0)
-            }
-            .onPreferenceChange(PreviewWidthKey.self) { w in
-                previewContainerWidth = w
             }
 
             Group {
@@ -505,9 +477,9 @@ struct LottieToolView: View {
     }
 
     private var lottieInfoPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("基本信息")
-                .font(.subheadline.weight(.semibold))
+                .font(.title3.weight(.semibold))
                 .foregroundStyle(DiffToolTheme.text)
 
             if let info = model.fileInfo {
@@ -519,25 +491,25 @@ struct LottieToolView: View {
                 lottieInfoRow(title: "文件大小", value: info.fileSizeBytes.map { formatFileSize($0) } ?? "—")
             } else {
                 Text("加载动画后将显示尺寸、帧率、帧数、版本与文件大小。")
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(DiffToolTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(10)
+        .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 10).fill(DiffToolTheme.surface))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(DiffToolTheme.border.opacity(0.55)))
     }
 
     private func lottieInfoRow(title: String, value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title + "：")
-                .font(.caption)
+                .font(.subheadline)
                 .foregroundStyle(DiffToolTheme.muted)
-                .frame(width: 56, alignment: .leading)
+                .frame(width: 72, alignment: .leading)
             Text(value)
-                .font(.caption)
+                .font(.subheadline)
                 .foregroundStyle(DiffToolTheme.text)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -560,10 +532,15 @@ struct LottieToolView: View {
                         .foregroundStyle(DiffToolTheme.muted)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var previewSlot: some View {
         ZStack {
+            Rectangle()
+                .fill(model.canvasColor)
+                .allowsHitTesting(false)
+
             if model.hasFile, let path = model.filePath {
                 LottieHostRepresentable(
                     filePath: path,
@@ -581,12 +558,12 @@ struct LottieToolView: View {
                     }
                 )
                 .id(path)
+                .frame(width: lottiePlaybackSide, height: lottiePlaybackSide)
             } else {
                 dropPlaceholder
             }
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: previewHeight)
+        .frame(width: previewSlotSide, height: previewSlotSide)
         .overlay {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(dropTargeted ? DiffToolTheme.accent : DiffToolTheme.border.opacity(0.6), lineWidth: dropTargeted ? 2 : 1)
@@ -616,12 +593,5 @@ struct LottieToolView: View {
             }
         }
         return true
-    }
-}
-
-private struct PreviewWidthKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
