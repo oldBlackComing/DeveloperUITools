@@ -12,12 +12,13 @@ private enum ToolTab: String, CaseIterable, Identifiable, Hashable {
     case jsonFormat = "JSON 格式化"
     case imageCompress = "图片压缩"
     case lottie = "Lottie 预览"
+    case localizationCompare = "Localization vs EN"
 
     private static let sidebarOrderKey = "sidebar_tool_tab_order"
 
-    /// 默认顺序：JSON 格式化 → 图片压缩 → 文本行对比 → Lottie 预览
+    /// 默认顺序：JSON 格式化 → 图片压缩 → 文本行对比 → Lottie 预览 → Localization vs EN
     static var defaultTabOrder: [ToolTab] {
-        [.jsonFormat, .imageCompress, .lineDiff, .lottie]
+        [.jsonFormat, .imageCompress, .lineDiff, .lottie, .localizationCompare]
     }
 
     var id: String { rawValue }
@@ -28,6 +29,7 @@ private enum ToolTab: String, CaseIterable, Identifiable, Hashable {
         case .jsonFormat: "curlybraces"
         case .imageCompress: "photo.on.rectangle.angled"
         case .lottie: "play.rectangle.fill"
+        case .localizationCompare: "globe"
         }
     }
 
@@ -91,6 +93,8 @@ struct ContentView: View {
                         ImageCompressToolView()
                     case .lottie:
                         LottieToolView()
+                    case .localizationCompare:
+                        LocalizationCompareToolView()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
