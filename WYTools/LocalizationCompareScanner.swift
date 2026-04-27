@@ -37,9 +37,9 @@ enum LocalizationCompareScannerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noEnglishReference:
-            return "No English reference found. Add en.lproj (or en-US / en-GB) with .strings, or use Base.lproj / String Catalog with English as source."
+            return "未找到英文参考：请在主工程中加入带 `.strings` 的 `en.lproj`（或 `en-US` / `en-GB`），或使用 `Base.lproj` / 含英文的 String Catalog（`.xcstrings`）。"
         case .noStringsOrCatalogFound:
-            return "No .lproj folders or .xcstrings files were found under the selected folder."
+            return "所选目录下未发现 `.lproj` 或 `.xcstrings`（或均在 `Pods/` 内已被忽略）。"
         }
     }
 }
@@ -315,9 +315,15 @@ enum LocalizationCompareScanner {
             }
         }
         L("(2) unique .lproj count: \(lprojs.count)")
-        let pjFill = lprojs.filter { $0.path.contains("PJFillColor") }
-        L("    .lproj under path containing \"PJFillColor\": \(pjFill.count)")
-        for u in pjFill.prefix(20) { L("    \(u.lastPathComponent) ← \(u.deletingLastPathComponent().lastPathComponent)") }
+        let rootPath = projectRoot.standardizedFileURL.path
+        let underRoot = lprojs.filter { $0.path.hasPrefix(rootPath) }
+        L("    .lproj under selected root: \(underRoot.count) (of \(lprojs.count) total)")
+        for u in underRoot.prefix(20) {
+            L("    \(u.lastPathComponent) ← \(u.deletingLastPathComponent().lastPathComponent)")
+        }
+        if underRoot.count > 20 {
+            L("    … (\(underRoot.count - 20) more under root)")
+        }
 
         var perLocaleStrings: [String: [String: String]] = [:]
         for lproj in lprojs {
@@ -542,5 +548,26 @@ enum LocalizationCompareScanner {
             usedStringsFilesAsReference: useStringsFilesAsReference,
             languages: languageRows
         )
+    }
+
+    // MARK: - Paths for Cursor / append
+
+    /// 与扫描相同的规则：扫描根目录下所有 `.lproj`（排除 `Pods/`），去重。
+    nonisolated static func includedLprojRoots(projectRoot: URL) throws -> [URL] {
+        let scanRoots = scanDirectoryRoots(primary: projectRoot)
+        var seen = Set<String>()
+        var lprojs: [URL] = []
+        for r in scanRoots {
+            for u in try collectLprojRoots(under: r) where seen.insert(u.path).inserted {
+                lprojs.append(u)
+            }
+        }
+        return lprojs
+    }
+
+    /// `ar.lproj` → 与扫描一致的展示用语言码（如 `zh-Hans`）。
+    nonisolated static func displayLocaleCode(forLproj lproj: URL) -> String {
+        let code = languageCode(fromLprojURL: lproj)
+        return normalizedDisplayLocaleCode(code)
     }
 }
