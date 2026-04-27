@@ -164,6 +164,12 @@ struct LocalizationCompareToolView: View {
                 .buttonStyle(DiffToolSecondaryButtonStyle())
                 .disabled(viewModel.isMachineTranslating || viewModel.isScanning)
 
+                Button("对齐（按英文顺序重排）") {
+                    Task { await viewModel.alignStringsFilesToEnglishOrder() }
+                }
+                .buttonStyle(DiffToolSecondaryButtonStyle())
+                .disabled(viewModel.isMachineTranslating || viewModel.isScanning)
+
                 if viewModel.isMachineTranslating {
                     ProgressView()
                         .controlSize(.small)
@@ -537,28 +543,27 @@ struct LocalizationCompareToolView: View {
                         .foregroundStyle(DiffToolTheme.ok)
                         .padding(.vertical, 8)
                 } else {
-                    HStack(alignment: .top, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
                             Text("缺失项")
                                 .font(.caption)
                                 .foregroundStyle(DiffToolTheme.muted)
-                            ForEach(active.missingEntries) { entry in
-                                let id = LocalizationMissingEntryID(languageCode: active.languageCode, key: entry.key)
-                                missingEntryRow(entry: entry, id: id, viewModel: viewModel)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                        VStack(alignment: .leading, spacing: 8) {
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             Text("翻译结果（预览）")
                                 .font(.caption)
                                 .foregroundStyle(DiffToolTheme.muted)
-                            ForEach(active.missingEntries) { entry in
-                                let id = LocalizationMissingEntryID(languageCode: active.languageCode, key: entry.key)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        ForEach(active.missingEntries) { entry in
+                            let id = LocalizationMissingEntryID(languageCode: active.languageCode, key: entry.key)
+                            HStack(alignment: .top, spacing: 12) {
+                                missingEntryRow(entry: entry, id: id, viewModel: viewModel)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 translatedPreviewRow(entry: entry, id: id, viewModel: viewModel)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             } else if !viewModel.selectedLanguageTab.isEmpty {
