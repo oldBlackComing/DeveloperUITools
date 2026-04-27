@@ -150,12 +150,18 @@ struct LocalizationCompareToolView: View {
             .foregroundStyle(DiffToolTheme.muted)
             .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
-                Button("本机翻译勾选并写入工程") {
+                Button("本机翻译（生成右侧结果）") {
                     Task {
-                        await viewModel.machineTranslateSelectedAndApply(onDeviceCoordinator: onDeviceTranslationCoordinator)
+                        await viewModel.machineTranslateSelectedToPreview(onDeviceCoordinator: onDeviceTranslationCoordinator)
                     }
                 }
                 .buttonStyle(DiffToolPrimaryButtonStyle())
+                .disabled(viewModel.isMachineTranslating || viewModel.isScanning)
+
+                Button("应用（写入工程）") {
+                    Task { await viewModel.applyTranslatedPreviewToFiles() }
+                }
+                .buttonStyle(DiffToolSecondaryButtonStyle())
                 .disabled(viewModel.isMachineTranslating || viewModel.isScanning)
 
                 if viewModel.isMachineTranslating {
@@ -198,6 +204,12 @@ struct LocalizationCompareToolView: View {
                     }
                 }
                 .buttonStyle(DiffToolPrimaryButtonStyle())
+                .disabled(viewModel.isMachineTranslating)
+
+                Button("取消（本次不再提示）") {
+                    viewModel.cancelTranslationLanguageDownload()
+                }
+                .buttonStyle(DiffToolSecondaryButtonStyle())
                 .disabled(viewModel.isMachineTranslating)
                 Spacer(minLength: 0)
             }
@@ -525,11 +537,28 @@ struct LocalizationCompareToolView: View {
                         .foregroundStyle(DiffToolTheme.ok)
                         .padding(.vertical, 8)
                 } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(active.missingEntries) { entry in
-                            let id = LocalizationMissingEntryID(languageCode: active.languageCode, key: entry.key)
-                            missingEntryRow(entry: entry, id: id, viewModel: viewModel)
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("缺失项")
+                                .font(.caption)
+                                .foregroundStyle(DiffToolTheme.muted)
+                            ForEach(active.missingEntries) { entry in
+                                let id = LocalizationMissingEntryID(languageCode: active.languageCode, key: entry.key)
+                                missingEntryRow(entry: entry, id: id, viewModel: viewModel)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("翻译结果（预览）")
+                                .font(.caption)
+                                .foregroundStyle(DiffToolTheme.muted)
+                            ForEach(active.missingEntries) { entry in
+                                let id = LocalizationMissingEntryID(languageCode: active.languageCode, key: entry.key)
+                                translatedPreviewRow(entry: entry, id: id, viewModel: viewModel)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             } else if !viewModel.selectedLanguageTab.isEmpty {
@@ -580,6 +609,41 @@ struct LocalizationCompareToolView: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
+        .background(RoundedRectangle(cornerRadius: 8).fill(DiffToolTheme.lineDim))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(DiffToolTheme.border.opacity(0.35), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func translatedPreviewRow(
+        entry: MissingLocalizationEntry,
+        id: LocalizationMissingEntryID,
+        viewModel: LocalizationCompareViewModel
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(entry.key)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(DiffToolTheme.muted)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            if let v = viewModel.translatedPreviewByID[id], !v.isEmpty {
+                Text(v)
+                    .font(.subheadline)
+                    .foregroundStyle(DiffToolTheme.text)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("（未生成）")
+                    .font(.subheadline)
+                    .foregroundStyle(DiffToolTheme.muted)
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8).fill(DiffToolTheme.lineDim))
         .overlay(
             RoundedRectangle(cornerRadius: 8)

@@ -42,11 +42,15 @@ final class LocalizationCompareViewModel {
     var cursorGuidePayload: CursorLocalizationGuidePayload?
 
     var isMachineTranslating = false
+    /// 右侧预览区显示的翻译结果（先翻译、后应用写入）。
+    var translatedPreviewByID: [LocalizationMissingEntryID: String] = [:]
 
     /// 本机翻译语言包需下载时展示；用户点「帮我下载」后触发 `prepareTranslation()`。
     var showTranslationLanguageDownloadSheet = false
     var translationLocalesNeedingDownload: [String] = []
     private var pendingOnDeviceTranslationItems: [LocalizationMachineTranslationItem] = []
+    /// 用户取消下载后，本次会话内不再反复弹窗提示（避免死循环）。
+    private var suppressedDownloadLocales: Set<String> = []
 
     private var securityScopedFolderURL: URL?
     private var isAccessingSecurityScopedResource = false
@@ -81,6 +85,8 @@ final class LocalizationCompareViewModel {
         showTranslationLanguageDownloadSheet = false
         translationLocalesNeedingDownload = []
         pendingOnDeviceTranslationItems = []
+        suppressedDownloadLocales = []
+        translatedPreviewByID = [:]
     }
 
     func scan() async {
@@ -128,6 +134,8 @@ final class LocalizationCompareViewModel {
         showTranslationLanguageDownloadSheet = false
         translationLocalesNeedingDownload = []
         pendingOnDeviceTranslationItems = []
+        suppressedDownloadLocales = []
+        translatedPreviewByID = [:]
     }
 
     func setEntrySelected(_ id: LocalizationMissingEntryID, isOn: Bool) {
@@ -279,8 +287,8 @@ final class LocalizationCompareViewModel {
         showAppendTranslationSheet = true
     }
 
-    /// 使用 Apple 本机 Translation 翻译勾选条目并写入 `Localizable.strings`（需 macOS 15+）。
-    func machineTranslateSelectedAndApply(onDeviceCoordinator: OnDeviceTranslationCoordinator) async {
+    /// 使用 Apple 本机 Translation 翻译勾选条目并生成右侧预览（不写文件；需 macOS 15+）。
+    func machineTranslateSelectedToPreview(onDeviceCoordinator: OnDeviceTranslationCoordinator) async {
         guard #available(macOS 15.0, *) else {
             workflowMessage = LocalizationOnDeviceTranslationError.needsMacOS15.errorDescription
             return
@@ -307,19 +315,24 @@ final class LocalizationCompareViewModel {
         }
 
         let needDownload = await LocalizationOnDeviceTranslationSupport.lprojCodesNeedingDownload(fromEnglishToLprojCodes: localeCodes)
-        if !needDownload.isEmpty {
+        let filteredNeedDownload = needDownload.filter { !suppressedDownloadLocales.contains($0) }
+        if !filteredNeedDownload.isEmpty {
             pendingOnDeviceTranslationItems = items
-            translationLocalesNeedingDownload = needDownload
+            translationLocalesNeedingDownload = filteredNeedDownload
             showTranslationLanguageDownloadSheet = true
-            workflowMessage = "以下语言需先下载本机翻译语言包，请点击「帮我下载」：\(needDownload.joined(separator: ", "))。"
+            workflowMessage = "以下语言需先下载本机翻译语言包，请点击「帮我下载」：\(filteredNeedDownload.joined(separator: ", "))。"
+            return
+        } else if !needDownload.isEmpty {
+            workflowMessage = "你已取消下载以下语言包（本次不再弹窗）：\(needDownload.joined(separator: ", "))。如需再次下载，可在系统设置里下载后再点翻译。"
             return
         }
 
-        await performOnDeviceTranslationWrite(items: items, projectRoot: root, scan: currentScan, onDeviceCoordinator: onDeviceCoordinator)
+        await performOnDeviceTranslationPreview(items: items, projectRoot: root, scan: currentScan, onDeviceCoordinator: onDeviceCoordinator)
     }
 
     func cancelTranslationLanguageDownload() {
         showTranslationLanguageDownloadSheet = false
+        suppressedDownloadLocales.formUnion(translationLocalesNeedingDownload)
         translationLocalesNeedingDownload = []
         pendingOnDeviceTranslationItems = []
     }
@@ -348,14 +361,19 @@ final class LocalizationCompareViewModel {
             translationLocalesNeedingDownload = []
             let items = pendingOnDeviceTranslationItems
             pendingOnDeviceTranslationItems = []
-            workflowMessage = "语言包下载请求已提交。正在尝试写入译文…"
-            await performOnDeviceTranslationWrite(items: items, projectRoot: root, scan: currentScan, onDeviceCoordinator: onDeviceCoordinator)
+            workflowMessage = "语言包下载请求已提交。正在尝试生成翻译预览…"
+            await performOnDeviceTranslationPreview(items: items, projectRoot: root, scan: currentScan, onDeviceCoordinator: onDeviceCoordinator)
         } catch {
+            // 用户取消下载时，避免再次触发弹窗导致“死循环”
+            suppressedDownloadLocales.formUnion(translationLocalesNeedingDownload)
+            showTranslationLanguageDownloadSheet = false
+            translationLocalesNeedingDownload = []
+            pendingOnDeviceTranslationItems = []
             workflowMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 
-    private func performOnDeviceTranslationWrite(
+    private func performOnDeviceTranslationPreview(
         items: [LocalizationMachineTranslationItem],
         projectRoot: URL,
         scan: LocalizationCompareScanResult,
@@ -369,15 +387,58 @@ final class LocalizationCompareViewModel {
                 items: items,
                 coordinator: onDeviceCoordinator
             )
+            var updated = translatedPreviewByID
+            updated.reserveCapacity(updated.count + rows.count)
+            for r in rows {
+                let id = LocalizationMissingEntryID(languageCode: r.locale, key: r.key)
+                updated[id] = r.value
+            }
+            translatedPreviewByID = updated
+            workflowMessage = "已生成 \(rows.count) 条翻译预览。请在右侧检查后点击「应用」写入工程。"
+        } catch {
+            workflowMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// 将右侧预览中已生成的勾选项写入工程文件（追加到末尾）。
+    func applyTranslatedPreviewToFiles() async {
+        guard let root = securityScopedFolderURL, let currentScan = scanResult else {
+            workflowMessage = "请先选择文件夹并完成扫描。"
+            return
+        }
+        let chosen = selectedMissingEntryIDs
+        guard !chosen.isEmpty else {
+            workflowMessage = "请先勾选要写入的条目。"
+            return
+        }
+
+        var rows: [(locale: String, key: String, value: String)] = []
+        rows.reserveCapacity(chosen.count)
+        var missingPreview = 0
+        for id in chosen {
+            guard let value = translatedPreviewByID[id], !value.isEmpty else {
+                missingPreview += 1
+                continue
+            }
+            rows.append((locale: id.languageCode, key: id.key, value: value))
+        }
+        guard !rows.isEmpty else {
+            workflowMessage = missingPreview > 0
+                ? "右侧暂无可应用的译文（有 \(missingPreview) 条未生成预览）。请先点「本机翻译」生成预览。"
+                : "右侧暂无可应用的译文。"
+            return
+        }
+
+        do {
             let jsonl = try LocalizationOnDeviceTranslationBatch.encodeJSONL(rows: rows)
             let report = try LocalizationCursorWorkflow.applyPastedJSONL(
                 text: jsonl,
-                projectRoot: projectRoot,
-                scanResult: scan,
+                projectRoot: root,
+                scanResult: currentScan,
                 selected: selectedMissingEntryIDs
             )
             let detail = report.messages.joined(separator: "\n")
-            let summary = "本机翻译已写入 \(report.appendedLineCount) 条；跳过 \(report.skippedLineCount) 行。\n\(detail)"
+            let summary = "已应用 \(report.appendedLineCount) 条；跳过 \(report.skippedLineCount) 行。\n\(detail)"
             await self.scan()
             workflowMessage = summary
         } catch {
