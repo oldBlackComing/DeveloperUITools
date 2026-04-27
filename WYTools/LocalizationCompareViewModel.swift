@@ -446,6 +446,37 @@ final class LocalizationCompareViewModel {
         }
     }
 
+    /// 独立功能：将目标语言的 `Localizable.strings` 按英文 key 顺序对齐重写；缺译用注释占位。
+    func alignStringsFilesToEnglishOrder(locales: [String]? = nil) async {
+        guard let root = securityScopedFolderURL, let currentScan = scanResult else {
+            workflowMessage = "请先选择文件夹并完成扫描。"
+            return
+        }
+        let targetLocales: [String]
+        if let locales, !locales.isEmpty {
+            targetLocales = locales
+        } else {
+            // 默认：当前扫描出来的全部语言
+            targetLocales = currentScan.languages.map(\.languageCode)
+        }
+        guard !targetLocales.isEmpty else {
+            workflowMessage = "没有可对齐的语言。"
+            return
+        }
+
+        do {
+            let report = try LocalizationCursorWorkflow.alignLocalizableStringsToEnglishOrder(
+                projectRoot: root,
+                scanResult: currentScan,
+                targetLocales: targetLocales
+            )
+            let detail = report.messages.joined(separator: "\n")
+            workflowMessage = "已对齐重写 \(report.appendedLineCount) 个文件。\n\(detail)"
+        } catch {
+            workflowMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
     private func buildMachineTranslationItems(
         scan: LocalizationCompareScanResult,
         selected: Set<LocalizationMissingEntryID>

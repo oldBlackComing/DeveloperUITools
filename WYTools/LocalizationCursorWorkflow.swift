@@ -269,6 +269,154 @@ enum LocalizationCursorWorkflow {
         try body.write(to: fileURL, atomically: true, encoding: .utf8)
     }
 
+    // MARK: Align
+
+    /// 将目标语言的 `Localizable.strings` 按英文 `Localizable.strings` 的 key 顺序对齐重写。
+    /// - Missing：若该语言缺省某个 key，会写入注释占位（不会生效），并带英文参考。
+    static func alignLocalizableStringsToEnglishOrder(
+        projectRoot: URL,
+        scanResult: LocalizationCompareScanResult,
+        targetLocales: [String]
+    ) throws -> AppendReport {
+        let lprojs = try LocalizationCompareScanner.includedLprojRoots(projectRoot: projectRoot)
+
+        guard let englishFile = try pickEnglishLocalizableStrings(lprojRoots: lprojs, projectRoot: projectRoot) else {
+            return AppendReport(
+                appendedLineCount: 0,
+                skippedLineCount: 0,
+                messages: ["未找到英文 Localizable.strings，已跳过对齐。"]
+            )
+        }
+
+        let englishText = (try? readTextFile(url: englishFile)) ?? ""
+        let englishDict = (NSDictionary(contentsOf: englishFile) as? [String: String]) ?? [:]
+
+        var messages: [String] = []
+        var rewrittenCount = 0
+
+        for locale in Array(Set(targetLocales)).sorted() {
+            guard let fileURL = try pickPrimaryLocalizableStrings(
+                localeDisplayCode: locale,
+                lprojRoots: lprojs,
+                projectRoot: projectRoot
+            ) else {
+                messages.append("`\(locale)`：未找到 Localizable.strings，跳过对齐。")
+                continue
+            }
+
+            let existing = (NSDictionary(contentsOf: fileURL) as? [String: String]) ?? [:]
+            let aligned = buildAlignedStringsFileByMirroringEnglish(
+                locale: locale,
+                englishText: englishText,
+                englishByKey: englishDict,
+                localeByKey: existing
+            )
+            try aligned.write(to: fileURL, atomically: true, encoding: .utf8)
+            rewrittenCount += 1
+            messages.append("`\(locale)`：已按英文顺序对齐并重写 `\(fileURL.path)`。")
+        }
+
+        return AppendReport(appendedLineCount: rewrittenCount, skippedLineCount: 0, messages: messages)
+    }
+
+    private static func pickEnglishLocalizableStrings(lprojRoots: [URL], projectRoot: URL) throws -> URL? {
+        // 优先：en / en-*；其次 Base
+        let preferred: [String] = ["en", "en-US", "en-GB", "Base"]
+        for code in preferred {
+            if let u = try pickPrimaryLocalizableStrings(localeDisplayCode: code, lprojRoots: lprojRoots, projectRoot: projectRoot) {
+                return u
+            }
+        }
+        return nil
+    }
+
+    /// 将英文文件每一行当作模板镜像输出：注释/空行原样保留；遇到 `"key" = "..." ;` 行则替换为该语言对应 key 的翻译。
+    /// 这样每个语言文件的行号与英文文件严格对应。
+    private static func buildAlignedStringsFileByMirroringEnglish(
+        locale: String,
+        englishText: String,
+        englishByKey: [String: String],
+        localeByKey: [String: String]
+    ) -> String {
+        let rawLines = englishText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var out: [String] = []
+        out.reserveCapacity(rawLines.count + 16)
+
+        // 匹配一行 key-value：保留行首缩进
+        let re = try? NSRegularExpression(
+            pattern: #"^(\s*)"((?:\\.|[^"\\])*)"\s*=\s*"(?:\\.|[^"\\])*"\s*;\s*$"#,
+            options: []
+        )
+
+        var englishKeySet = Set<String>()
+
+        for line in rawLines {
+            guard let re else {
+                out.append(line)
+                continue
+            }
+            let ns = line as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            guard let m = re.firstMatch(in: line, options: [], range: range),
+                  m.numberOfRanges >= 3
+            else {
+                out.append(line)
+                continue
+            }
+
+            let indent = ns.substring(with: m.range(at: 1))
+            let rawKey = ns.substring(with: m.range(at: 2))
+            let key = unescapeStringsLiteral(rawKey).precomposedStringWithCanonicalMapping
+            englishKeySet.insert(key)
+
+            if let v = localeByKey[key] {
+                out.append(indent + escapeStringsLine(key: key, value: v))
+            } else {
+                let en = englishByKey[key] ?? ""
+                let placeholder = escapeStringsLine(key: key, value: en)
+                // 占位：同一行位置用注释包住，保证不生效且与英文行号对齐
+                out.append(indent + "/* " + placeholder + " */")
+            }
+        }
+
+        // 额外 key：追加到底部（不影响与英文的逐行对齐部分）
+        let extraKeys = localeByKey.keys.filter { !englishKeySet.contains($0) }.sorted()
+        if !extraKeys.isEmpty {
+            out.append("")
+            out.append("/* Extra keys (not in English reference) */")
+            for key in extraKeys {
+                if let v = localeByKey[key] {
+                    out.append(escapeStringsLine(key: key, value: v))
+                }
+            }
+        }
+
+        return out.joined(separator: "\n")
+    }
+
+    private static func unescapeStringsLiteral(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.count)
+        var it = s.makeIterator()
+        while let ch = it.next() {
+            if ch != "\\" {
+                out.append(ch)
+                continue
+            }
+            guard let n = it.next() else { break }
+            switch n {
+            case "\"": out.append("\"")
+            case "\\": out.append("\\")
+            case "n": out.append("\n")
+            case "r": out.append("\r")
+            case "t": out.append("\t")
+            default:
+                out.append(n)
+            }
+        }
+        return out
+    }
+
     /// 优先：`根名/根名/locale.lproj/Localizable.strings`；否则取该语言下路径最短的 `Localizable.strings`。
     private static func pickPrimaryLocalizableStrings(
         localeDisplayCode: String,
