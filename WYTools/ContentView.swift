@@ -12,11 +12,11 @@ private enum ToolTab: String, CaseIterable, Identifiable, Hashable {
     case jsonFormat = "JSON 格式化"
     case imageCompress = "图片压缩"
     case lottie = "Lottie 预览"
-    case localizationCompare = "Localization vs EN"
+    case localizationCompare = "本地化对比（Localization vs EN）"
 
     private static let sidebarOrderKey = "sidebar_tool_tab_order"
 
-    /// 默认顺序：JSON 格式化 → 图片压缩 → 文本行对比 → Lottie 预览 → Localization vs EN
+    /// 默认顺序：JSON 格式化 → 图片压缩 → 文本行对比 → Lottie 预览 → 本地化对比（Localization vs EN）
     static var defaultTabOrder: [ToolTab] {
         [.jsonFormat, .imageCompress, .lineDiff, .lottie, .localizationCompare]
     }
