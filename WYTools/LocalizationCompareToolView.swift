@@ -268,7 +268,7 @@ struct LocalizationCompareToolView: View {
             Text("CURSOR / 写入")
                 .font(.caption)
                 .foregroundStyle(DiffToolTheme.muted)
-            Text("推荐：一键调用 Cursor CLI 先生成右侧预览，再手动点「应用（写入工程）」。也可用旧流程：① 在 Cursor 里按提示生成 JSONL；② 回到本应用写入工程。")
+            Text("先用 Cursor CLI 生成右侧预览，再在本区点击「应用预览到工程」。")
                 .font(.caption2)
                 .foregroundStyle(DiffToolTheme.muted)
             
@@ -288,27 +288,17 @@ struct LocalizationCompareToolView: View {
                 .buttonStyle(DiffToolPrimaryButtonStyle())
                 .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)
                 
+                Button("应用预览到工程") {
+                    Task { await viewModel.applyTranslatedPreviewToFiles() }
+                }
+                .buttonStyle(DiffToolSecondaryButtonStyle())
+                .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)
+
                 Button("内置终端诊断 agent") {
                     Task { await viewModel.runCursorCLIDiagnosis() }
                 }
                 .buttonStyle(DiffToolSecondaryButtonStyle())
                 .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)
-                
-                Button("第 1 步：打开 Cursor 并翻译勾选") {
-                    viewModel.invokeCursorForSelectedTranslations()
-                }
-                .buttonStyle(DiffToolPrimaryButtonStyle())
-
-                Button("第 2 步：从剪贴板写入工程") {
-                    viewModel.pasteAppendTextFromClipboard()
-                    viewModel.applyAppendFromPastedJSONL()
-                }
-                .buttonStyle(DiffToolSecondaryButtonStyle())
-
-                Button("手动粘贴后写入…") {
-                    viewModel.showAppendTranslationSheet = true
-                }
-                .buttonStyle(DiffToolSecondaryButtonStyle())
                 
                 if viewModel.isCursorCLIRunning {
                     Button("取消") {

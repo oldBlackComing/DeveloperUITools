@@ -46,6 +46,8 @@ final class LocalizationCompareViewModel {
     var cursorCLICurrentSourceText: String = ""
     var showCursorCLITerminalPanel: Bool = true
     var cursorCLITerminalOutput: String = ""
+    private var cursorCLITerminalPendingOutput: String = ""
+    private var cursorCLITerminalFlushScheduled = false
     private var cursorCLICancelToken = LocalizationCursorCLICancelToken()
 
     var showAppendTranslationSheet = false
@@ -271,7 +273,7 @@ final class LocalizationCompareViewModel {
         )
     }
     
-    /// 一键：调用 Cursor CLI `agent -p` 生成 JSONL，并写入右侧预览（不自动写文件）。
+    /// 一键：调用 Cursor CLI `agent -p` 分批生成 JSONL，并写入右侧预览（不自动写文件）。
     func translateWithCursorCLIToPreview() async {
         cursorGuidePayload = nil
         guard securityScopedFolderURL != nil, let scan = scanResult else {
@@ -312,53 +314,71 @@ final class LocalizationCompareViewModel {
         isCursorCLIRunning = true
         cursorCLICancelToken = LocalizationCursorCLICancelToken()
         defer { isCursorCLIRunning = false }
-        
-        let prompt = LocalizationCursorWorkflow.buildAgentTranslationPrompt(
-            scanResult: scan,
-            selectedInOrder: orderedIDs
-        )
-        
+
+        let batchSize = 20
+        var updated = translatedPreviewByID
+        updated.reserveCapacity(updated.count + orderedIDs.count)
+        var totalGenerated = 0
+        var totalSkipped = 0
+        var completedBase = 0
+
         do {
-            let outputURL = try await LocalizationCursorWorkflow.runAgentToJSONLFile(
-                prompt: prompt,
-                agentExecutablePath: cursorCLIAgentExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines),
-                cancelToken: cursorCLICancelToken,
-                onJSONLLine: { [weak self] completed in
-                    guard let self else { return }
-                    Task { @MainActor in
-                        self.cursorCLICompletedCount = min(completed, self.cursorCLITotalCount)
-                        let idx = max(min(completed, orderedIDs.count) - 1, 0)
-                        if orderedIDs.indices.contains(idx) {
-                            let id = orderedIDs[idx]
-                            self.cursorCLICurrentLocale = id.languageCode
-                            self.cursorCLICurrentKey = id.key
-                            self.cursorCLICurrentSourceText = enByID[id] ?? ""
+            for start in stride(from: 0, to: orderedIDs.count, by: batchSize) {
+                let end = min(start + batchSize, orderedIDs.count)
+                let batchIDs = Array(orderedIDs[start ..< end])
+                let batchSet = Set(batchIDs)
+                let prompt = LocalizationCursorWorkflow.buildAgentTranslationPrompt(
+                    scanResult: scan,
+                    selectedInOrder: batchIDs
+                )
+
+                workflowMessage = "Cursor CLI 分批翻译中（\(start / batchSize + 1)/\((orderedIDs.count + batchSize - 1) / batchSize)）…"
+
+                let outputURL = try await LocalizationCursorWorkflow.runAgentToJSONLFile(
+                    prompt: prompt,
+                    agentExecutablePath: cursorCLIAgentExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines),
+                    cancelToken: cursorCLICancelToken,
+                    onJSONLLine: { [weak self] completed in
+                        guard let self else { return }
+                        Task { @MainActor in
+                            self.cursorCLICompletedCount = min(completedBase + completed, self.cursorCLITotalCount)
+                            let idx = max(min(completedBase + completed, orderedIDs.count) - 1, 0)
+                            if orderedIDs.indices.contains(idx) {
+                                let id = orderedIDs[idx]
+                                self.cursorCLICurrentLocale = id.languageCode
+                                self.cursorCLICurrentKey = id.key
+                                self.cursorCLICurrentSourceText = enByID[id] ?? ""
+                            }
+                        }
+                    },
+                    onConsoleOutput: { [weak self] text in
+                        guard let self else { return }
+                        Task { @MainActor in
+                            self.enqueueCursorCLITerminalOutput(text)
                         }
                     }
-                },
-                onConsoleOutput: { [weak self] text in
-                    guard let self else { return }
-                    Task { @MainActor in
-                        self.appendCursorCLITerminalOutput(text)
-                    }
+                )
+
+                let text = try String(contentsOf: outputURL, encoding: .utf8)
+                appendPasteText = text
+                let parsed = try LocalizationCursorWorkflow.parseJSONLPreview(
+                    text: text,
+                    selected: batchSet
+                )
+                for row in parsed.rows {
+                    let id = LocalizationMissingEntryID(languageCode: row.locale, key: row.key)
+                    updated[id] = row.value
                 }
-            )
-            
-            let text = try String(contentsOf: outputURL, encoding: .utf8)
-            appendPasteText = text
-            let parsed = try LocalizationCursorWorkflow.parseJSONLPreview(
-                text: text,
-                selected: chosen
-            )
-            var updated = translatedPreviewByID
-            updated.reserveCapacity(updated.count + parsed.rows.count)
-            for row in parsed.rows {
-                let id = LocalizationMissingEntryID(languageCode: row.locale, key: row.key)
-                updated[id] = row.value
+                totalGenerated += parsed.rows.count
+                totalSkipped += parsed.skippedLineCount
+                completedBase += parsed.rows.count
+                cursorCLICompletedCount = min(completedBase, cursorCLITotalCount)
+                translatedPreviewByID = updated
             }
-            translatedPreviewByID = updated
-            workflowMessage = "已生成 \(parsed.rows.count) 条 Cursor 预览；跳过 \(parsed.skippedLineCount) 行。请在右侧检查后点击「应用（写入工程）」。"
+
+            workflowMessage = "已分批生成 \(totalGenerated) 条 Cursor 预览；跳过 \(totalSkipped) 行。请在右侧检查后点击「应用预览到工程」。"
         } catch {
+            translatedPreviewByID = updated
             workflowMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
@@ -384,7 +404,7 @@ final class LocalizationCompareViewModel {
                 onConsoleOutput: { [weak self] text in
                     guard let self else { return }
                     Task { @MainActor in
-                        self.appendCursorCLITerminalOutput(text)
+                        self.enqueueCursorCLITerminalOutput(text)
                     }
                 }
             )
@@ -409,14 +429,31 @@ final class LocalizationCompareViewModel {
     
     func clearCursorCLITerminalOutput() {
         cursorCLITerminalOutput = ""
+        cursorCLITerminalPendingOutput = ""
     }
     
-    private func appendCursorCLITerminalOutput(_ text: String) {
+    private func enqueueCursorCLITerminalOutput(_ text: String) {
         guard !text.isEmpty else { return }
-        if cursorCLITerminalOutput.count > 80_000 {
-            cursorCLITerminalOutput.removeFirst(20_000)
+        // 高频输出先聚合后批量刷新，避免 UI 高频重排导致卡顿。
+        cursorCLITerminalPendingOutput.append(text)
+        if cursorCLITerminalPendingOutput.count > 12_000 {
+            cursorCLITerminalPendingOutput = String(cursorCLITerminalPendingOutput.suffix(8_000))
         }
-        cursorCLITerminalOutput.append(text)
+        guard !cursorCLITerminalFlushScheduled else { return }
+        cursorCLITerminalFlushScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            await MainActor.run {
+                guard let self else { return }
+                self.cursorCLITerminalFlushScheduled = false
+                guard !self.cursorCLITerminalPendingOutput.isEmpty else { return }
+                self.cursorCLITerminalOutput.append(self.cursorCLITerminalPendingOutput)
+                self.cursorCLITerminalPendingOutput = ""
+                if self.cursorCLITerminalOutput.count > 24_000 {
+                    self.cursorCLITerminalOutput = String(self.cursorCLITerminalOutput.suffix(24_000))
+                }
+            }
+        }
     }
 
     /// 复制发给 Cursor 的推荐口令（与提示文件内一致）。

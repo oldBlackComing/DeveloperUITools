@@ -271,8 +271,9 @@ agent --trust -p "$1"
         let p = Process()
         p.executableURL = res.executableURL
         p.arguments = res.arguments
-        onConsoleOutput?("$ \(res.executableURL.path) \(res.arguments.joined(separator: " "))\n")
+        let promptChars = prompt.count
         onConsoleOutput?("[debug] \(res.debugHint)\n")
+        onConsoleOutput?("[debug] command=\(res.executableURL.path) args=\(res.arguments.count) prompt_chars=\(promptChars)\n")
         
         let outPipe = Pipe()
         let errPipe = Pipe()
