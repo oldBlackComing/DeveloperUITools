@@ -432,17 +432,20 @@ agent --trust -p "$1"
         let skippedLineCount: Int
         let messages: [String]
     }
+    
+    struct ParsedJSONLPreview: Sendable {
+        let rows: [(locale: String, key: String, value: String)]
+        let skippedLineCount: Int
+    }
 
-    /// 解析 JSONL，将 `locale`+`key` 在 `selected` 中的条目追加到对应语言的主 `Localizable.strings` 末尾。
-    static func applyPastedJSONL(
+    /// 仅解析 JSONL 为预览行（不写文件）。
+    static func parseJSONLPreview(
         text: String,
-        projectRoot: URL,
-        scanResult: LocalizationCompareScanResult,
         selected: Set<LocalizationMissingEntryID>
-    ) throws -> AppendReport {
-        var pairs: [String: [(key: String, value: String)]] = [:]
+    ) throws -> ParsedJSONLPreview {
+        var rows: [(locale: String, key: String, value: String)] = []
+        rows.reserveCapacity(selected.count)
         var skipped = 0
-        var parseNotes: [String] = []
 
         for rawLine in text.split(whereSeparator: \.isNewline) {
             let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -464,12 +467,28 @@ agent --trust -p "$1"
                 skipped += 1
                 continue
             }
-
-            pairs[match.languageCode, default: []].append((key: keyN, value: value))
+            rows.append((locale: match.languageCode, key: keyN, value: value))
         }
 
-        if pairs.isEmpty {
+        if rows.isEmpty {
             throw AppendError.noValidLines
+        }
+        return ParsedJSONLPreview(rows: rows, skippedLineCount: skipped)
+    }
+
+    /// 解析 JSONL，将 `locale`+`key` 在 `selected` 中的条目追加到对应语言的主 `Localizable.strings` 末尾。
+    static func applyPastedJSONL(
+        text: String,
+        projectRoot: URL,
+        scanResult: LocalizationCompareScanResult,
+        selected: Set<LocalizationMissingEntryID>
+    ) throws -> AppendReport {
+        var pairs: [String: [(key: String, value: String)]] = [:]
+        var parseNotes: [String] = []
+        let parsed = try parseJSONLPreview(text: text, selected: selected)
+        var skipped = parsed.skippedLineCount
+        for row in parsed.rows {
+            pairs[row.locale, default: []].append((key: row.key, value: row.value))
         }
 
         let lprojs = try LocalizationCompareScanner.includedLprojRoots(projectRoot: projectRoot)

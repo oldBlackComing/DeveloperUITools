@@ -268,7 +268,7 @@ struct LocalizationCompareToolView: View {
             Text("CURSOR / 写入")
                 .font(.caption)
                 .foregroundStyle(DiffToolTheme.muted)
-            Text("推荐：一键调用 Cursor CLI 生成 JSONL 并自动写入。也可用旧流程：① 在 Cursor 里按提示生成 JSONL；② 回到本应用写入工程。")
+            Text("推荐：一键调用 Cursor CLI 先生成右侧预览，再手动点「应用（写入工程）」。也可用旧流程：① 在 Cursor 里按提示生成 JSONL；② 回到本应用写入工程。")
                 .font(.caption2)
                 .foregroundStyle(DiffToolTheme.muted)
             
@@ -282,8 +282,8 @@ struct LocalizationCompareToolView: View {
                     .buttonStyle(DiffToolSecondaryButtonStyle())
             }
             HStack(spacing: 10) {
-                Button("一键：Cursor CLI 翻译并写入") {
-                    Task { await viewModel.translateWithCursorCLIAndApply() }
+                Button("一键：Cursor CLI 翻译到预览") {
+                    Task { await viewModel.translateWithCursorCLIToPreview() }
                 }
                 .buttonStyle(DiffToolPrimaryButtonStyle())
                 .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)

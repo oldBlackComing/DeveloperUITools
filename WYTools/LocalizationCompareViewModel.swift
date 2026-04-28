@@ -271,8 +271,8 @@ final class LocalizationCompareViewModel {
         )
     }
     
-    /// 一键：调用 Cursor CLI `agent -p` 生成 JSONL，并自动写入工程（不需要跳转 Cursor UI）。
-    func translateWithCursorCLIAndApply() async {
+    /// 一键：调用 Cursor CLI `agent -p` 生成 JSONL，并写入右侧预览（不自动写文件）。
+    func translateWithCursorCLIToPreview() async {
         cursorGuidePayload = nil
         guard securityScopedFolderURL != nil, let scan = scanResult else {
             workflowMessage = "请先选择文件夹并完成扫描。"
@@ -346,8 +346,18 @@ final class LocalizationCompareViewModel {
             
             let text = try String(contentsOf: outputURL, encoding: .utf8)
             appendPasteText = text
-            applyAppendFromPastedJSONL()
-            // 写入成功/失败提示由 `applyAppendFromPastedJSONL` 内部产生并覆盖
+            let parsed = try LocalizationCursorWorkflow.parseJSONLPreview(
+                text: text,
+                selected: chosen
+            )
+            var updated = translatedPreviewByID
+            updated.reserveCapacity(updated.count + parsed.rows.count)
+            for row in parsed.rows {
+                let id = LocalizationMissingEntryID(languageCode: row.locale, key: row.key)
+                updated[id] = row.value
+            }
+            translatedPreviewByID = updated
+            workflowMessage = "已生成 \(parsed.rows.count) 条 Cursor 预览；跳过 \(parsed.skippedLineCount) 行。请在右侧检查后点击「应用（写入工程）」。"
         } catch {
             workflowMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
