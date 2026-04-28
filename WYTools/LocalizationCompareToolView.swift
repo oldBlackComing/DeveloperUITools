@@ -175,6 +175,34 @@ struct LocalizationCompareToolView: View {
                         .controlSize(.small)
                 }
             }
+            
+            if viewModel.isMachineTranslating {
+                VStack(alignment: .leading, spacing: 6) {
+                    let total = max(viewModel.machineTranslationTotalCount, 0)
+                    let done = min(max(viewModel.machineTranslationCompletedCount, 0), max(total, 1))
+                    ProgressView(value: Double(done), total: Double(max(total, 1)))
+                        .controlSize(.small)
+                    Text("正在翻译：\(viewModel.machineTranslationCurrentLocale)  \(done)/\(max(total, 1))")
+                        .font(.caption2)
+                        .foregroundStyle(DiffToolTheme.muted)
+                        .textSelection(.enabled)
+                    if !viewModel.machineTranslationCurrentKey.isEmpty {
+                        Text("key: \(viewModel.machineTranslationCurrentKey)")
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(DiffToolTheme.muted)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                    if !viewModel.machineTranslationCurrentSourceText.isEmpty {
+                        Text(viewModel.machineTranslationCurrentSourceText)
+                            .font(.caption2)
+                            .foregroundStyle(DiffToolTheme.muted)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -240,10 +268,26 @@ struct LocalizationCompareToolView: View {
             Text("CURSOR / 写入")
                 .font(.caption)
                 .foregroundStyle(DiffToolTheme.muted)
-            Text("分两步：① 在 Cursor 里按提示生成 JSONL；② 回到本应用写入工程。点第 1 步后会自动弹出说明窗口。")
+            Text("推荐：一键调用 Cursor CLI 生成 JSONL 并自动写入。也可用旧流程：① 在 Cursor 里按提示生成 JSONL；② 回到本应用写入工程。")
                 .font(.caption2)
                 .foregroundStyle(DiffToolTheme.muted)
+            
             HStack(spacing: 10) {
+                Text("agent 路径")
+                    .font(.caption2)
+                    .foregroundStyle(DiffToolTheme.muted)
+                TextField("留空则自动探测；若失败请手动选择", text: $viewModel.cursorCLIAgentExecutablePath)
+                    .textFieldStyle(.roundedBorder)
+                Button("选择…") { viewModel.pickCursorCLIAgentExecutable() }
+                    .buttonStyle(DiffToolSecondaryButtonStyle())
+            }
+            HStack(spacing: 10) {
+                Button("一键：Cursor CLI 翻译并写入") {
+                    Task { await viewModel.translateWithCursorCLIAndApply() }
+                }
+                .buttonStyle(DiffToolPrimaryButtonStyle())
+                .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)
+                
                 Button("第 1 步：打开 Cursor 并翻译勾选") {
                     viewModel.invokeCursorForSelectedTranslations()
                 }
@@ -259,6 +303,41 @@ struct LocalizationCompareToolView: View {
                     viewModel.showAppendTranslationSheet = true
                 }
                 .buttonStyle(DiffToolSecondaryButtonStyle())
+                
+                if viewModel.isCursorCLIRunning {
+                    Button("取消") {
+                        viewModel.cancelCursorCLITranslation()
+                    }
+                    .buttonStyle(DiffToolSecondaryButtonStyle())
+                }
+            }
+            
+            if viewModel.isCursorCLIRunning {
+                VStack(alignment: .leading, spacing: 6) {
+                    let total = max(viewModel.cursorCLITotalCount, 0)
+                    let done = min(max(viewModel.cursorCLICompletedCount, 0), max(total, 1))
+                    ProgressView(value: Double(done), total: Double(max(total, 1)))
+                        .controlSize(.small)
+                    Text("Cursor CLI 处理中：\(viewModel.cursorCLICurrentLocale)  \(done)/\(max(total, 1))")
+                        .font(.caption2)
+                        .foregroundStyle(DiffToolTheme.muted)
+                        .textSelection(.enabled)
+                    if !viewModel.cursorCLICurrentKey.isEmpty {
+                        Text("key: \(viewModel.cursorCLICurrentKey)")
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(DiffToolTheme.muted)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                    if !viewModel.cursorCLICurrentSourceText.isEmpty {
+                        Text(viewModel.cursorCLICurrentSourceText)
+                            .font(.caption2)
+                            .foregroundStyle(DiffToolTheme.muted)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                }
             }
             if let msg = viewModel.workflowMessage, !msg.isEmpty {
                 Text(msg)

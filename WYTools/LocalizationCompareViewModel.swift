@@ -34,6 +34,17 @@ final class LocalizationCompareViewModel {
 
     /// Cursor / 追加流程提示（成功或说明）
     var workflowMessage: String?
+    
+    /// Cursor CLI（agent）一键翻译状态
+    var isCursorCLIRunning: Bool = false
+    /// 可选：用户手动指定 `agent` 可执行文件路径（用于 App 环境找不到 PATH 时兜底）
+    var cursorCLIAgentExecutablePath: String = UserDefaults.standard.string(forKey: "WYTools.CursorCLIAgentExecutablePath") ?? ""
+    var cursorCLITotalCount: Int = 0
+    var cursorCLICompletedCount: Int = 0
+    var cursorCLICurrentLocale: String = ""
+    var cursorCLICurrentKey: String = ""
+    var cursorCLICurrentSourceText: String = ""
+    private var cursorCLICancelToken = LocalizationCursorCLICancelToken()
 
     var showAppendTranslationSheet = false
     var appendPasteText = ""
@@ -44,6 +55,13 @@ final class LocalizationCompareViewModel {
     var isMachineTranslating = false
     /// 右侧预览区显示的翻译结果（先翻译、后应用写入）。
     var translatedPreviewByID: [LocalizationMissingEntryID: String] = [:]
+    
+    /// 本机翻译进度（仅用于 UI 展示）
+    var machineTranslationTotalCount: Int = 0
+    var machineTranslationCompletedCount: Int = 0
+    var machineTranslationCurrentLocale: String = ""
+    var machineTranslationCurrentKey: String = ""
+    var machineTranslationCurrentSourceText: String = ""
 
     /// 本机翻译语言包需下载时展示；用户点「帮我下载」后触发 `prepareTranslation()`。
     var showTranslationLanguageDownloadSheet = false
@@ -78,6 +96,13 @@ final class LocalizationCompareViewModel {
         selectedLanguageTab = ""
         selectedMissingEntryIDs = []
         workflowMessage = nil
+        isCursorCLIRunning = false
+        cursorCLITotalCount = 0
+        cursorCLICompletedCount = 0
+        cursorCLICurrentLocale = ""
+        cursorCLICurrentKey = ""
+        cursorCLICurrentSourceText = ""
+        cursorCLICancelToken = LocalizationCursorCLICancelToken()
         appendPasteText = ""
         showAppendTranslationSheet = false
         cursorGuidePayload = nil
@@ -87,6 +112,11 @@ final class LocalizationCompareViewModel {
         pendingOnDeviceTranslationItems = []
         suppressedDownloadLocales = []
         translatedPreviewByID = [:]
+        machineTranslationTotalCount = 0
+        machineTranslationCompletedCount = 0
+        machineTranslationCurrentLocale = ""
+        machineTranslationCurrentKey = ""
+        machineTranslationCurrentSourceText = ""
     }
 
     func scan() async {
@@ -127,6 +157,13 @@ final class LocalizationCompareViewModel {
         selectedLanguageTab = ""
         selectedMissingEntryIDs = []
         workflowMessage = nil
+        isCursorCLIRunning = false
+        cursorCLITotalCount = 0
+        cursorCLICompletedCount = 0
+        cursorCLICurrentLocale = ""
+        cursorCLICurrentKey = ""
+        cursorCLICurrentSourceText = ""
+        cursorCLICancelToken = LocalizationCursorCLICancelToken()
         appendPasteText = ""
         showAppendTranslationSheet = false
         cursorGuidePayload = nil
@@ -136,6 +173,11 @@ final class LocalizationCompareViewModel {
         pendingOnDeviceTranslationItems = []
         suppressedDownloadLocales = []
         translatedPreviewByID = [:]
+        machineTranslationTotalCount = 0
+        machineTranslationCompletedCount = 0
+        machineTranslationCurrentLocale = ""
+        machineTranslationCurrentKey = ""
+        machineTranslationCurrentSourceText = ""
     }
 
     func setEntrySelected(_ id: LocalizationMissingEntryID, isOn: Bool) {
@@ -221,6 +263,98 @@ final class LocalizationCompareViewModel {
             launchSummary: result.summary,
             tempFilePath: result.tempFileURL?.path
         )
+    }
+    
+    /// 一键：调用 Cursor CLI `agent -p` 生成 JSONL，并自动写入工程（不需要跳转 Cursor UI）。
+    func translateWithCursorCLIAndApply() async {
+        cursorGuidePayload = nil
+        guard securityScopedFolderURL != nil, let scan = scanResult else {
+            workflowMessage = "请先选择文件夹并完成扫描。"
+            return
+        }
+        let chosen = selectedMissingEntryIDs
+        guard !chosen.isEmpty else {
+            workflowMessage = "请先勾选要翻译的缺失条目。"
+            return
+        }
+        guard !isCursorCLIRunning else { return }
+        
+        // 固定顺序：locale 升序、key 升序；用于进度与“当前正在翻译”的展示
+        let orderedIDs: [LocalizationMissingEntryID] = chosen.sorted {
+            if $0.languageCode == $1.languageCode { return $0.key < $1.key }
+            return $0.languageCode < $1.languageCode
+        }
+        
+        var enByID: [LocalizationMissingEntryID: String] = [:]
+        enByID.reserveCapacity(orderedIDs.count)
+        for id in orderedIDs {
+            guard let lang = scan.languages.first(where: { $0.languageCode == id.languageCode }),
+                  let entry = lang.missingEntries.first(where: { $0.key == id.key })
+            else { continue }
+            enByID[id] = entry.englishValue
+        }
+        
+        cursorCLITotalCount = orderedIDs.count
+        cursorCLICompletedCount = 0
+        cursorCLICurrentLocale = ""
+        cursorCLICurrentKey = ""
+        cursorCLICurrentSourceText = ""
+        workflowMessage = "正在通过 Cursor CLI 生成 JSONL…"
+        
+        isCursorCLIRunning = true
+        cursorCLICancelToken = LocalizationCursorCLICancelToken()
+        defer { isCursorCLIRunning = false }
+        
+        let prompt = LocalizationCursorWorkflow.buildAgentTranslationPrompt(
+            scanResult: scan,
+            selectedInOrder: orderedIDs
+        )
+        
+        do {
+            let outputURL = try await LocalizationCursorWorkflow.runAgentToJSONLFile(
+                prompt: prompt,
+                agentExecutablePath: cursorCLIAgentExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines),
+                cancelToken: cursorCLICancelToken,
+                onJSONLLine: { [weak self] completed in
+                    guard let self else { return }
+                    Task { @MainActor in
+                        self.cursorCLICompletedCount = min(completed, self.cursorCLITotalCount)
+                        let idx = max(min(completed, orderedIDs.count) - 1, 0)
+                        if orderedIDs.indices.contains(idx) {
+                            let id = orderedIDs[idx]
+                            self.cursorCLICurrentLocale = id.languageCode
+                            self.cursorCLICurrentKey = id.key
+                            self.cursorCLICurrentSourceText = enByID[id] ?? ""
+                        }
+                    }
+                }
+            )
+            
+            let text = try String(contentsOf: outputURL, encoding: .utf8)
+            appendPasteText = text
+            applyAppendFromPastedJSONL()
+            // 写入成功/失败提示由 `applyAppendFromPastedJSONL` 内部产生并覆盖
+        } catch {
+            workflowMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+    
+    func cancelCursorCLITranslation() {
+        cursorCLICancelToken.cancel()
+        workflowMessage = "已取消 Cursor CLI 翻译任务。"
+    }
+
+    func pickCursorCLIAgentExecutable() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "请选择 Cursor CLI 的 `agent` 可执行文件（例如 /usr/local/bin/agent）。"
+        panel.prompt = "选择"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        cursorCLIAgentExecutablePath = url.path
+        UserDefaults.standard.set(url.path, forKey: "WYTools.CursorCLIAgentExecutablePath")
+        workflowMessage = "已设置 agent 路径：\(url.path)"
     }
 
     /// 复制发给 Cursor 的推荐口令（与提示文件内一致）。
@@ -381,11 +515,26 @@ final class LocalizationCompareViewModel {
     ) async {
         isMachineTranslating = true
         defer { isMachineTranslating = false }
+        
+        machineTranslationTotalCount = items.count
+        machineTranslationCompletedCount = 0
+        machineTranslationCurrentLocale = ""
+        machineTranslationCurrentKey = ""
+        machineTranslationCurrentSourceText = ""
 
         do {
             let rows = try await LocalizationOnDeviceTranslationBatch.translateAll(
                 items: items,
-                coordinator: onDeviceCoordinator
+                coordinator: onDeviceCoordinator,
+                onProgress: { progress in
+                    Task { @MainActor in
+                        self.machineTranslationTotalCount = progress.total
+                        self.machineTranslationCompletedCount = progress.completed
+                        self.machineTranslationCurrentLocale = progress.locale
+                        self.machineTranslationCurrentKey = progress.key
+                        self.machineTranslationCurrentSourceText = progress.sourceText
+                    }
+                }
             )
             var updated = translatedPreviewByID
             updated.reserveCapacity(updated.count + rows.count)

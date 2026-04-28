@@ -146,6 +146,14 @@ struct OnDeviceTranslationRunner: View {
 
 @MainActor
 enum LocalizationOnDeviceTranslationBatch {
+    struct Progress: Sendable {
+        let total: Int
+        let completed: Int
+        let locale: String
+        let key: String
+        let sourceText: String
+    }
+    
     static func encodeJSONL(rows: [(locale: String, key: String, value: String)]) throws -> String {
         struct Row: Encodable {
             let locale: String
@@ -175,13 +183,28 @@ enum LocalizationOnDeviceTranslationBatch {
     private static func translateOneLocaleGroupReturningRows(
         locale: String,
         group: [LocalizationMachineTranslationItem],
-        coordinator: OnDeviceTranslationCoordinator
+        coordinator: OnDeviceTranslationCoordinator,
+        baseCompleted: Int,
+        totalCount: Int,
+        onProgress: (@Sendable (Progress) -> Void)?
     ) async throws -> [(locale: String, key: String, value: String)] {
         let sourceLang = LocalizationAppleLocaleMapping.englishSourceLanguage()
         let targetLang = LocalizationAppleLocaleMapping.targetLanguage(forLprojLanguageCode: locale)
         let config = TranslationSession.Configuration(source: sourceLang, target: targetLang)
         let sourceTexts = group.map {
             $0.englishSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? $0.key : $0.englishSource
+        }
+        
+        if let first = group.first {
+            onProgress?(
+                Progress(
+                    total: totalCount,
+                    completed: baseCompleted,
+                    locale: locale,
+                    key: first.key,
+                    sourceText: sourceTexts.first ?? ""
+                )
+            )
         }
 
         let box = TranslationRowBox()
@@ -201,6 +224,15 @@ enum LocalizationOnDeviceTranslationBatch {
             for i in 0 ..< group.count {
                 let it = group[i]
                 box.rows.append((locale: it.locale, key: it.key, value: outs[i]))
+                onProgress?(
+                    Progress(
+                        total: totalCount,
+                        completed: baseCompleted + i + 1,
+                        locale: locale,
+                        key: it.key,
+                        sourceText: sourceTexts[i]
+                    )
+                )
             }
         }
         return box.rows
@@ -209,7 +241,8 @@ enum LocalizationOnDeviceTranslationBatch {
     @available(macOS 15.0, *)
     static func translateAll(
         items: [LocalizationMachineTranslationItem],
-        coordinator: OnDeviceTranslationCoordinator
+        coordinator: OnDeviceTranslationCoordinator,
+        onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> [(locale: String, key: String, value: String)] {
         guard !items.isEmpty else { return [] }
 
@@ -220,15 +253,21 @@ enum LocalizationOnDeviceTranslationBatch {
 
         var results: [(locale: String, key: String, value: String)] = []
         results.reserveCapacity(items.count)
+        let totalCount = items.count
+        var completed = 0
 
         for locale in byLocale.keys.sorted() {
             guard let group = byLocale[locale], !group.isEmpty else { continue }
             let part = try await translateOneLocaleGroupReturningRows(
                 locale: locale,
                 group: group,
-                coordinator: coordinator
+                coordinator: coordinator,
+                baseCompleted: completed,
+                totalCount: totalCount,
+                onProgress: onProgress
             )
             results.append(contentsOf: part)
+            completed += group.count
         }
 
         return results

@@ -6,9 +6,107 @@
 import AppKit
 import Foundation
 
+final class LocalizationCursorCLICancelToken: @unchecked Sendable {
+    nonisolated(unsafe) fileprivate var process: Process?
+    func cancel() {
+        process?.terminate()
+    }
+}
+
+struct LocalizationCursorCLIError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+actor LocalizationCursorCLIStreamState {
+    private var completed = 0
+    private var buffer = Data()
+    private var stderrText = ""
+
+    func ingestStdout(_ data: Data) -> Int {
+        buffer.append(data)
+        while true {
+            guard let r = buffer.firstRange(of: Data([0x0A])) else { break }
+            let lineData = buffer.subdata(in: 0 ..< r.lowerBound)
+            buffer.removeSubrange(0 ..< r.upperBound)
+            if let s = String(data: lineData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               s.hasPrefix("{"), s.hasSuffix("}") {
+                completed += 1
+            }
+        }
+        return completed
+    }
+
+    func ingestStderr(_ data: Data) {
+        guard let s = String(data: data, encoding: .utf8), !s.isEmpty else { return }
+        if stderrText.count >= 16_000 { return }
+        stderrText.append(s)
+    }
+
+    func stderrSnapshot() -> String {
+        stderrText
+    }
+}
+
 /// 生成 Cursor 提示词、尝试拉起 Cursor/CLI、解析译文并写入 `.strings`。
 @MainActor
 enum LocalizationCursorWorkflow {
+    private struct AgentResolution {
+        let executableURL: URL
+        let arguments: [String]
+        let debugHint: String
+    }
+    
+    private static func resolveAgent(
+        preferredPath: String,
+        prompt: String
+    ) -> AgentResolution? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        
+        let trimmed = preferredPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, fm.isExecutableFile(atPath: trimmed) {
+            return AgentResolution(
+                executableURL: URL(fileURLWithPath: trimmed),
+                arguments: ["-p", prompt],
+                debugHint: "使用用户指定路径：\(trimmed)"
+            )
+        }
+        
+        // Cursor 官方安装指南：默认在 ~/.local/bin/agent
+        // 另补常见 Homebrew / Cursor 目录、以及 Cursor.app 包内
+        let candidates: [String] = [
+            "/usr/local/bin/agent",
+            "/opt/homebrew/bin/agent",
+            home.appendingPathComponent(".local/bin/agent").path,
+            home.appendingPathComponent("cursor/agent").path,
+            home.appendingPathComponent("cursor/bin/agent").path,
+            home.appendingPathComponent("cursor/cursor-web/agent").path,
+            home.appendingPathComponent("cursor/cursor-web/bin/agent").path,
+            "/Applications/Cursor.app/Contents/Resources/app/bin/agent",
+            "/Applications/Cursor.app/Contents/Resources/app/out/bin/agent",
+        ]
+        
+        if let hit = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) {
+            return AgentResolution(
+                executableURL: URL(fileURLWithPath: hit),
+                arguments: ["-p", prompt],
+                debugHint: "使用自动探测命中路径：\(hit)"
+            )
+        }
+        
+        // 最后兜底：交互 + login shell（依赖用户 shell 配置）
+        if fm.isExecutableFile(atPath: "/bin/zsh") {
+            return AgentResolution(
+                executableURL: URL(fileURLWithPath: "/bin/zsh"),
+                arguments: ["-lic", #"agent -p "$1""#, "--", prompt],
+                debugHint: "使用 zsh -lic 兜底（依赖 PATH/alias/function）"
+            )
+        }
+        
+        return nil
+    }
 
     /// 拉起 Cursor 后的结果（用于界面引导）。
     struct CursorPromptLaunchResult: Sendable {
@@ -82,6 +180,124 @@ enum LocalizationCursorWorkflow {
         lines.append("")
         lines.append(#"{"locale":"zh-Hans","key":"Hello","value":"你好"}"#)
         return lines.joined(separator: "\n")
+    }
+    
+    /// 给 Cursor CLI `agent -p` 的提示词（非 Markdown；只关心输出 JSONL）。
+    static func buildAgentTranslationPrompt(
+        scanResult: LocalizationCompareScanResult,
+        selectedInOrder: [LocalizationMissingEntryID]
+    ) -> String {
+        var lines: [String] = []
+        lines.append("你是本地化翻译助手。请将给定的英文参考翻译成目标语言。")
+        lines.append("")
+        lines.append("输出要求（必须严格遵守）：")
+        lines.append("1) 只输出 JSON Lines，每行一个 JSON 对象，不要 Markdown，不要解释。")
+        lines.append(#"2) 每行格式：{"locale":"语言码","key":"原文 key","value":"译文"}"#)
+        lines.append("3) 必须覆盖所有条目；不要合并；不要省略。")
+        lines.append("4) locale 与 key 必须与条目一致，value 为自然、符合 iOS 习惯的译文。")
+        lines.append("")
+        lines.append("待翻译条目：")
+        
+        // 便于取英文参考
+        var enByLocaleKey: [String: [String: String]] = [:]
+        for lang in scanResult.languages {
+            var d: [String: String] = [:]
+            for e in lang.missingEntries { d[e.key] = e.englishValue }
+            enByLocaleKey[lang.languageCode] = d
+        }
+        
+        for id in selectedInOrder {
+            let en = enByLocaleKey[id.languageCode]?[id.key] ?? ""
+            lines.append("- locale: \(id.languageCode)")
+            lines.append("  key: \(id.key)")
+            lines.append("  English: \(en.isEmpty ? "(empty)" : en)")
+        }
+        
+        return lines.joined(separator: "\n")
+    }
+    
+    /// 运行 `agent -p` 并将 stdout 写入临时 JSONL 文件；同时按 JSON 行数回调进度。
+    static func runAgentToJSONLFile(
+        prompt: String,
+        agentExecutablePath: String,
+        cancelToken: LocalizationCursorCLICancelToken,
+        onJSONLLine: (@Sendable (_ completedCount: Int) -> Void)? = nil
+    ) async throws -> URL {
+        let outName = "WYTools_cursor_agent_\(Int(Date().timeIntervalSince1970)).jsonl"
+        let outURL = FileManager.default.temporaryDirectory.appendingPathComponent(outName)
+        FileManager.default.createFile(atPath: outURL.path, contents: nil)
+        let fh = try FileHandle(forWritingTo: outURL)
+        defer { try? fh.close() }
+        
+        guard let res = resolveAgent(preferredPath: agentExecutablePath, prompt: prompt) else {
+            throw LocalizationCursorCLIError(message: "无法解析 Cursor CLI（agent）的可执行路径。请在界面中手动选择 agent 路径。")
+        }
+        
+        let p = Process()
+        p.executableURL = res.executableURL
+        p.arguments = res.arguments
+        
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+        cancelToken.process = p
+
+        let state = LocalizationCursorCLIStreamState()
+        
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { return }
+
+            // 写文件：原样追加
+            try? fh.write(contentsOf: data)
+
+            Task {
+                let done = await state.ingestStdout(data)
+                onJSONLLine?(done)
+            }
+        }
+        
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { return }
+            Task { await state.ingestStderr(data) }
+        }
+        
+        return try await withCheckedThrowingContinuation { cont in
+            p.terminationHandler = { proc in
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                if proc.terminationReason == .uncaughtSignal {
+                    cont.resume(throwing: LocalizationCursorCLIError(message: "已取消。"))
+                    return
+                }
+                if proc.terminationStatus == 0 {
+                    cont.resume(returning: outURL)
+                } else {
+                    Task {
+                        let err = (await state.stderrSnapshot()).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let tail = err.isEmpty ? "" : "\n\(err)"
+                        cont.resume(
+                            throwing: LocalizationCursorCLIError(
+                                message: "Cursor CLI 运行失败（exit=\(proc.terminationStatus)）。\n\(res.debugHint)\n请确认终端中 `agent -p \"hi\"` 可用。\n\(tail)"
+                            )
+                        )
+                    }
+                }
+            }
+            do {
+                try p.run()
+            } catch {
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                cont.resume(
+                    throwing: LocalizationCursorCLIError(
+                        message: "无法启动 Cursor CLI：\(error.localizedDescription)。请确认命令 `agent` 已安装且在常见路径或 PATH 中可用。"
+                    )
+                )
+            }
+        }
     }
 
     // MARK: Cursor / open
