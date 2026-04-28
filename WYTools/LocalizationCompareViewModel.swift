@@ -44,6 +44,8 @@ final class LocalizationCompareViewModel {
     var cursorCLICurrentLocale: String = ""
     var cursorCLICurrentKey: String = ""
     var cursorCLICurrentSourceText: String = ""
+    var showCursorCLITerminalPanel: Bool = true
+    var cursorCLITerminalOutput: String = ""
     private var cursorCLICancelToken = LocalizationCursorCLICancelToken()
 
     var showAppendTranslationSheet = false
@@ -102,6 +104,8 @@ final class LocalizationCompareViewModel {
         cursorCLICurrentLocale = ""
         cursorCLICurrentKey = ""
         cursorCLICurrentSourceText = ""
+        showCursorCLITerminalPanel = true
+        cursorCLITerminalOutput = ""
         cursorCLICancelToken = LocalizationCursorCLICancelToken()
         appendPasteText = ""
         showAppendTranslationSheet = false
@@ -163,6 +167,8 @@ final class LocalizationCompareViewModel {
         cursorCLICurrentLocale = ""
         cursorCLICurrentKey = ""
         cursorCLICurrentSourceText = ""
+        showCursorCLITerminalPanel = true
+        cursorCLITerminalOutput = ""
         cursorCLICancelToken = LocalizationCursorCLICancelToken()
         appendPasteText = ""
         showAppendTranslationSheet = false
@@ -299,6 +305,8 @@ final class LocalizationCompareViewModel {
         cursorCLICurrentLocale = ""
         cursorCLICurrentKey = ""
         cursorCLICurrentSourceText = ""
+        showCursorCLITerminalPanel = true
+        cursorCLITerminalOutput = ""
         workflowMessage = "正在通过 Cursor CLI 生成 JSONL…"
         
         isCursorCLIRunning = true
@@ -327,6 +335,12 @@ final class LocalizationCompareViewModel {
                             self.cursorCLICurrentSourceText = enByID[id] ?? ""
                         }
                     }
+                },
+                onConsoleOutput: { [weak self] text in
+                    guard let self else { return }
+                    Task { @MainActor in
+                        self.appendCursorCLITerminalOutput(text)
+                    }
                 }
             )
             
@@ -343,6 +357,32 @@ final class LocalizationCompareViewModel {
         cursorCLICancelToken.cancel()
         workflowMessage = "已取消 Cursor CLI 翻译任务。"
     }
+    
+    func runCursorCLIDiagnosis() async {
+        guard !isCursorCLIRunning else { return }
+        isCursorCLIRunning = true
+        cursorCLICancelToken = LocalizationCursorCLICancelToken()
+        showCursorCLITerminalPanel = true
+        cursorCLITerminalOutput = ""
+        workflowMessage = "正在诊断 Cursor CLI…"
+        defer { isCursorCLIRunning = false }
+        
+        do {
+            try await LocalizationCursorWorkflow.runEmbeddedTerminalDiagnosis(
+                agentExecutablePath: cursorCLIAgentExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines),
+                cancelToken: cursorCLICancelToken,
+                onConsoleOutput: { [weak self] text in
+                    guard let self else { return }
+                    Task { @MainActor in
+                        self.appendCursorCLITerminalOutput(text)
+                    }
+                }
+            )
+            workflowMessage = "诊断完成。"
+        } catch {
+            workflowMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
 
     func pickCursorCLIAgentExecutable() {
         let panel = NSOpenPanel()
@@ -355,6 +395,18 @@ final class LocalizationCompareViewModel {
         cursorCLIAgentExecutablePath = url.path
         UserDefaults.standard.set(url.path, forKey: "WYTools.CursorCLIAgentExecutablePath")
         workflowMessage = "已设置 agent 路径：\(url.path)"
+    }
+    
+    func clearCursorCLITerminalOutput() {
+        cursorCLITerminalOutput = ""
+    }
+    
+    private func appendCursorCLITerminalOutput(_ text: String) {
+        guard !text.isEmpty else { return }
+        if cursorCLITerminalOutput.count > 80_000 {
+            cursorCLITerminalOutput.removeFirst(20_000)
+        }
+        cursorCLITerminalOutput.append(text)
     }
 
     /// 复制发给 Cursor 的推荐口令（与提示文件内一致）。

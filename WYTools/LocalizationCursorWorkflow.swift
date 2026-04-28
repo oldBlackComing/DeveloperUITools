@@ -64,44 +64,78 @@ enum LocalizationCursorWorkflow {
     ) -> AgentResolution? {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
+        let userName = NSUserName()
+        let userHomePath = NSHomeDirectoryForUser(userName) ?? "/Users/\(userName)"
+        let userHome = URL(fileURLWithPath: userHomePath, isDirectory: true)
         
         let trimmed = preferredPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty, fm.isExecutableFile(atPath: trimmed) {
             return AgentResolution(
                 executableURL: URL(fileURLWithPath: trimmed),
-                arguments: ["-p", prompt],
+                arguments: ["--trust", "-p", prompt],
                 debugHint: "使用用户指定路径：\(trimmed)"
             )
         }
         
         // Cursor 官方安装指南：默认在 ~/.local/bin/agent
         // 另补常见 Homebrew / Cursor 目录、以及 Cursor.app 包内
-        let candidates: [String] = [
+        var candidates: [String] = [
             "/usr/local/bin/agent",
             "/opt/homebrew/bin/agent",
             home.appendingPathComponent(".local/bin/agent").path,
+            userHome.appendingPathComponent(".local/bin/agent").path,
+            userHome.appendingPathComponent(".local/bin/cursor-agent").path,
             home.appendingPathComponent("cursor/agent").path,
             home.appendingPathComponent("cursor/bin/agent").path,
             home.appendingPathComponent("cursor/cursor-web/agent").path,
             home.appendingPathComponent("cursor/cursor-web/bin/agent").path,
+            userHome.appendingPathComponent("cursor/agent").path,
+            userHome.appendingPathComponent("cursor/bin/agent").path,
+            userHome.appendingPathComponent("cursor/cursor-web/agent").path,
+            userHome.appendingPathComponent("cursor/cursor-web/bin/agent").path,
             "/Applications/Cursor.app/Contents/Resources/app/bin/agent",
             "/Applications/Cursor.app/Contents/Resources/app/out/bin/agent",
         ]
         
-        if let hit = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) {
+        // 额外兜底：扫描 /Users/*/.local/bin/{agent,cursor-agent}
+        if let userDirs = try? fm.contentsOfDirectory(atPath: "/Users") {
+            for name in userDirs where !name.hasPrefix(".") {
+                candidates.append("/Users/\(name)/.local/bin/agent")
+                candidates.append("/Users/\(name)/.local/bin/cursor-agent")
+            }
+        }
+        
+        if let hit = candidates.first(where: { fm.fileExists(atPath: $0) || fm.isExecutableFile(atPath: $0) }) {
             return AgentResolution(
                 executableURL: URL(fileURLWithPath: hit),
-                arguments: ["-p", prompt],
+                arguments: ["--trust", "-p", prompt],
                 debugHint: "使用自动探测命中路径：\(hit)"
             )
         }
         
         // 最后兜底：交互 + login shell（依赖用户 shell 配置）
         if fm.isExecutableFile(atPath: "/bin/zsh") {
+            let shellCommand = #"""
+setopt nonomatch
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH";
+source "$HOME/.zprofile" >/dev/null 2>&1 || true;
+source "$HOME/.zshrc" >/dev/null 2>&1 || true;
+for c in "$HOME/.local/bin/agent" "$HOME/.local/bin/cursor-agent" "/opt/homebrew/bin/agent" "/usr/local/bin/agent" "/Users/develop/.local/bin/agent" "/Users/develop/.local/bin/cursor-agent"; do
+  if [ -e "$c" ]; then
+    exec "$c" --trust -p "$1"
+  fi
+done
+for c in /Users/*/.local/bin/agent /Users/*/.local/bin/cursor-agent; do
+  if [ -e "$c" ]; then
+    exec "$c" --trust -p "$1"
+  fi
+done
+agent --trust -p "$1"
+"""#
             return AgentResolution(
                 executableURL: URL(fileURLWithPath: "/bin/zsh"),
-                arguments: ["-lic", #"agent -p "$1""#, "--", prompt],
-                debugHint: "使用 zsh -lic 兜底（依赖 PATH/alias/function）"
+                arguments: ["-ic", shellCommand, "--", prompt],
+                debugHint: "使用 zsh -ic + 显式 source ~/.zprofile ~/.zshrc 兜底"
             )
         }
         
@@ -221,7 +255,8 @@ enum LocalizationCursorWorkflow {
         prompt: String,
         agentExecutablePath: String,
         cancelToken: LocalizationCursorCLICancelToken,
-        onJSONLLine: (@Sendable (_ completedCount: Int) -> Void)? = nil
+        onJSONLLine: (@Sendable (_ completedCount: Int) -> Void)? = nil,
+        onConsoleOutput: (@Sendable (_ text: String) -> Void)? = nil
     ) async throws -> URL {
         let outName = "WYTools_cursor_agent_\(Int(Date().timeIntervalSince1970)).jsonl"
         let outURL = FileManager.default.temporaryDirectory.appendingPathComponent(outName)
@@ -236,6 +271,8 @@ enum LocalizationCursorWorkflow {
         let p = Process()
         p.executableURL = res.executableURL
         p.arguments = res.arguments
+        onConsoleOutput?("$ \(res.executableURL.path) \(res.arguments.joined(separator: " "))\n")
+        onConsoleOutput?("[debug] \(res.debugHint)\n")
         
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -251,6 +288,9 @@ enum LocalizationCursorWorkflow {
 
             // 写文件：原样追加
             try? fh.write(contentsOf: data)
+            if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+                onConsoleOutput?(s)
+            }
 
             Task {
                 let done = await state.ingestStdout(data)
@@ -261,10 +301,13 @@ enum LocalizationCursorWorkflow {
         errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+                onConsoleOutput?(s)
+            }
             Task { await state.ingestStderr(data) }
         }
         
-        return try await withCheckedThrowingContinuation { cont in
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
             p.terminationHandler = { proc in
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 errPipe.fileHandleForReading.readabilityHandler = nil
@@ -298,6 +341,23 @@ enum LocalizationCursorWorkflow {
                 )
             }
         }
+    }
+    
+    /// 在应用内以与一键翻译相同的命令解析链路做一次 CLI 诊断，输出到内置终端面板。
+    static func runEmbeddedTerminalDiagnosis(
+        agentExecutablePath: String,
+        cancelToken: LocalizationCursorCLICancelToken,
+        onConsoleOutput: (@Sendable (_ text: String) -> Void)? = nil
+    ) async throws {
+        let outputURL = try await runAgentToJSONLFile(
+            prompt: "hi",
+            agentExecutablePath: agentExecutablePath,
+            cancelToken: cancelToken,
+            onJSONLLine: nil,
+            onConsoleOutput: onConsoleOutput
+        )
+        onConsoleOutput?("\n[diagnose] 结束：exit=0\n")
+        try? FileManager.default.removeItem(at: outputURL)
     }
 
     // MARK: Cursor / open

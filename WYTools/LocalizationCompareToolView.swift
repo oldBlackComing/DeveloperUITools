@@ -288,6 +288,12 @@ struct LocalizationCompareToolView: View {
                 .buttonStyle(DiffToolPrimaryButtonStyle())
                 .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)
                 
+                Button("内置终端诊断 agent") {
+                    Task { await viewModel.runCursorCLIDiagnosis() }
+                }
+                .buttonStyle(DiffToolSecondaryButtonStyle())
+                .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)
+                
                 Button("第 1 步：打开 Cursor 并翻译勾选") {
                     viewModel.invokeCursorForSelectedTranslations()
                 }
@@ -307,6 +313,18 @@ struct LocalizationCompareToolView: View {
                 if viewModel.isCursorCLIRunning {
                     Button("取消") {
                         viewModel.cancelCursorCLITranslation()
+                    }
+                    .buttonStyle(DiffToolSecondaryButtonStyle())
+                }
+                
+                Button(viewModel.showCursorCLITerminalPanel ? "隐藏终端面板" : "显示终端面板") {
+                    viewModel.showCursorCLITerminalPanel.toggle()
+                }
+                .buttonStyle(DiffToolSecondaryButtonStyle())
+                
+                if viewModel.showCursorCLITerminalPanel {
+                    Button("清空终端输出") {
+                        viewModel.clearCursorCLITerminalOutput()
                     }
                     .buttonStyle(DiffToolSecondaryButtonStyle())
                 }
@@ -344,6 +362,28 @@ struct LocalizationCompareToolView: View {
                     .font(.caption)
                     .foregroundStyle(DiffToolTheme.muted)
                     .textSelection(.enabled)
+            }
+            
+            if viewModel.showCursorCLITerminalPanel {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("内置终端输出")
+                        .font(.caption)
+                        .foregroundStyle(DiffToolTheme.muted)
+                    ScrollView {
+                        Text(viewModel.cursorCLITerminalOutput.isEmpty ? "（暂无输出）" : viewModel.cursorCLITerminalOutput)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(DiffToolTheme.text)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding(8)
+                    }
+                    .frame(minHeight: 120, maxHeight: 220)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(DiffToolTheme.lineDim))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(DiffToolTheme.border.opacity(0.35), lineWidth: 1)
+                    )
+                }
             }
         }
         .padding(12)
