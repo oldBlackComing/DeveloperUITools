@@ -12,13 +12,14 @@ struct LocalizationCompareToolView: View {
 
     var body: some View {
         @Bindable var viewModel = viewModel
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(
-                    "每个语言标签下列出：英文 `.strings` 里已有、但该语言 `.strings` 里缺失的 key。仅扫描 `Pods/` 以外的文件（主工程及本地模块，如 CMPurchaseIOS）。若工程内没有英文 `.strings`，则退而使用 String Catalog（`.xcstrings`）。"
-                )
-                .font(.subheadline)
-                .foregroundStyle(DiffToolTheme.muted)
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(
+                        "每个语言标签下列出：英文 `.strings` 里已有、但该语言 `.strings` 里缺失的 key。仅扫描 `Pods/` 以外的文件（主工程及本地模块，如 CMPurchaseIOS）。若工程内没有英文 `.strings`，则退而使用 String Catalog（`.xcstrings`）。"
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(DiffToolTheme.muted)
 
                 HStack(spacing: 12) {
                     Button("选择文件夹…") {
@@ -100,23 +101,28 @@ struct LocalizationCompareToolView: View {
                         .foregroundStyle(DiffToolTheme.error)
                 }
 
-                if let result = viewModel.scanResult {
-                    summarySection(result)
+                    if let result = viewModel.scanResult {
+                        summarySection(result)
 
-                    machineTranslationBar(viewModel: viewModel)
+                        machineTranslationBar(viewModel: viewModel)
 
-                    localizationWorkflowBar(viewModel: viewModel)
+                        localizationWorkflowBar(viewModel: viewModel)
 
-                    if !result.languages.isEmpty {
-                        localeTabsAndMissingList(result: result, viewModel: viewModel)
-                    } else {
-                        Text("未发现非英文 `.strings` / String Catalog 条目，或各语言与英文 key 集合一致。")
-                            .font(.subheadline)
-                            .foregroundStyle(DiffToolTheme.muted)
+                        if !result.languages.isEmpty {
+                            localeTabsAndMissingList(result: result, viewModel: viewModel)
+                        } else {
+                            Text("未发现非英文 `.strings` / String Catalog 条目，或各语言与英文 key 集合一致。")
+                                .font(.subheadline)
+                                .foregroundStyle(DiffToolTheme.muted)
+                        }
                     }
+                    // 保底留白：即使没有待翻译项，也能上滑避免内容贴底。
+                    Color.clear
+                        .frame(height: 140)
                 }
+                .frame(minHeight: proxy.size.height + 96, alignment: .topLeading)
+                .padding(20)
             }
-            .padding(20)
         }
         .background(DiffToolTheme.background)
         .navigationTitle(localizationNavigationTitle(viewModel: viewModel))
@@ -286,6 +292,12 @@ struct LocalizationCompareToolView: View {
                     Task { await viewModel.translateWithCursorCLIToPreview() }
                 }
                 .buttonStyle(DiffToolPrimaryButtonStyle())
+                .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)
+
+                Button("继续翻译未完成") {
+                    Task { await viewModel.continueCursorCLIToPreview() }
+                }
+                .buttonStyle(DiffToolSecondaryButtonStyle())
                 .disabled(viewModel.isCursorCLIRunning || viewModel.isMachineTranslating || viewModel.isScanning)
                 
                 Button("应用预览到工程") {
@@ -572,7 +584,12 @@ struct LocalizationCompareToolView: View {
 
     @ViewBuilder
     private func localeTabsAndMissingList(result: LocalizationCompareScanResult, viewModel: LocalizationCompareViewModel) -> some View {
-        let sortedLangs = result.languages.sorted { $0.languageCode.localizedCaseInsensitiveCompare($1.languageCode) == .orderedAscending }
+        let sortedLangs = result.languages.sorted { lhs, rhs in
+            if lhs.missingEntries.count != rhs.missingEntries.count {
+                return lhs.missingEntries.count > rhs.missingEntries.count
+            }
+            return lhs.languageCode.localizedCaseInsensitiveCompare(rhs.languageCode) == .orderedAscending
+        }
 
         VStack(alignment: .leading, spacing: 12) {
             Text("语言")

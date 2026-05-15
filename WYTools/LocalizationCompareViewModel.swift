@@ -27,6 +27,7 @@ final class LocalizationCompareViewModel {
 
     /// Per missing row; default all selected after scan.
     var selectedMissingEntryIDs: Set<LocalizationMissingEntryID> = []
+    private var hasPerformedInitialAutoSelectInCurrentFolder = false
 
     var debugTraceKey: String = "10 consecutive works score above 85"
     var debugTraceOutput: String = ""
@@ -44,6 +45,7 @@ final class LocalizationCompareViewModel {
     var cursorCLICurrentLocale: String = ""
     var cursorCLICurrentKey: String = ""
     var cursorCLICurrentSourceText: String = ""
+    var cursorCLIFailedEntryIDs: Set<LocalizationMissingEntryID> = []
     var showCursorCLITerminalPanel: Bool = true
     var cursorCLITerminalOutput: String = ""
     private var cursorCLITerminalPendingOutput: String = ""
@@ -99,6 +101,7 @@ final class LocalizationCompareViewModel {
         errorMessage = nil
         selectedLanguageTab = ""
         selectedMissingEntryIDs = []
+        hasPerformedInitialAutoSelectInCurrentFolder = false
         workflowMessage = nil
         isCursorCLIRunning = false
         cursorCLITotalCount = 0
@@ -106,6 +109,7 @@ final class LocalizationCompareViewModel {
         cursorCLICurrentLocale = ""
         cursorCLICurrentKey = ""
         cursorCLICurrentSourceText = ""
+        cursorCLIFailedEntryIDs = []
         showCursorCLITerminalPanel = true
         cursorCLITerminalOutput = ""
         cursorCLICancelToken = LocalizationCursorCLICancelToken()
@@ -141,7 +145,14 @@ final class LocalizationCompareViewModel {
             let ids = result.languages.flatMap { lang in
                 lang.missingEntries.map { LocalizationMissingEntryID(languageCode: lang.languageCode, key: $0.key) }
             }
-            selectedMissingEntryIDs = Set(ids)
+            let allIDs = Set(ids)
+            if !hasPerformedInitialAutoSelectInCurrentFolder {
+                // 仅首次扫描自动全选；后续扫描保留用户选择。
+                selectedMissingEntryIDs = allIDs
+                hasPerformedInitialAutoSelectInCurrentFolder = true
+            } else {
+                selectedMissingEntryIDs = selectedMissingEntryIDs.intersection(allIDs)
+            }
             let codes = result.languages.map(\.languageCode).sorted()
             if selectedLanguageTab.isEmpty || !codes.contains(selectedLanguageTab) {
                 selectedLanguageTab = codes.first ?? ""
@@ -162,6 +173,7 @@ final class LocalizationCompareViewModel {
         errorMessage = nil
         selectedLanguageTab = ""
         selectedMissingEntryIDs = []
+        hasPerformedInitialAutoSelectInCurrentFolder = false
         workflowMessage = nil
         isCursorCLIRunning = false
         cursorCLITotalCount = 0
@@ -169,6 +181,7 @@ final class LocalizationCompareViewModel {
         cursorCLICurrentLocale = ""
         cursorCLICurrentKey = ""
         cursorCLICurrentSourceText = ""
+        cursorCLIFailedEntryIDs = []
         showCursorCLITerminalPanel = true
         cursorCLITerminalOutput = ""
         cursorCLICancelToken = LocalizationCursorCLICancelToken()
@@ -275,6 +288,15 @@ final class LocalizationCompareViewModel {
     
     /// 一键：调用 Cursor CLI `agent -p` 分批生成 JSONL，并写入右侧预览（不自动写文件）。
     func translateWithCursorCLIToPreview() async {
+        await translateWithCursorCLIToPreview(continueOnly: false)
+    }
+    
+    /// 继续：仅翻译未生成或上次失败条目。
+    func continueCursorCLIToPreview() async {
+        await translateWithCursorCLIToPreview(continueOnly: true)
+    }
+
+    private func translateWithCursorCLIToPreview(continueOnly: Bool) async {
         cursorGuidePayload = nil
         guard securityScopedFolderURL != nil, let scan = scanResult else {
             workflowMessage = "请先选择文件夹并完成扫描。"
@@ -288,9 +310,23 @@ final class LocalizationCompareViewModel {
         guard !isCursorCLIRunning else { return }
         
         // 固定顺序：locale 升序、key 升序；用于进度与“当前正在翻译”的展示
-        let orderedIDs: [LocalizationMissingEntryID] = chosen.sorted {
+        let baseOrderedIDs: [LocalizationMissingEntryID] = chosen.sorted {
             if $0.languageCode == $1.languageCode { return $0.key < $1.key }
             return $0.languageCode < $1.languageCode
+        }
+        let orderedIDs: [LocalizationMissingEntryID]
+        if continueOnly {
+            orderedIDs = baseOrderedIDs.filter { id in
+                let hasPreview = !(translatedPreviewByID[id] ?? "").isEmpty
+                return !hasPreview || cursorCLIFailedEntryIDs.contains(id)
+            }
+            guard !orderedIDs.isEmpty else {
+                workflowMessage = "没有未完成条目，当前勾选项都已有预览。"
+                return
+            }
+        } else {
+            orderedIDs = baseOrderedIDs
+            cursorCLIFailedEntryIDs = []
         }
         
         var enByID: [LocalizationMissingEntryID: String] = [:]
@@ -320,12 +356,18 @@ final class LocalizationCompareViewModel {
         updated.reserveCapacity(updated.count + orderedIDs.count)
         var totalGenerated = 0
         var totalSkipped = 0
+        var totalMalformed = 0
+        var totalUnmatched = 0
+        var totalAutoCorrected = 0
         var completedBase = 0
+        var failedIDs = cursorCLIFailedEntryIDs
+        var currentBatchIDs: [LocalizationMissingEntryID] = []
 
         do {
             for start in stride(from: 0, to: orderedIDs.count, by: batchSize) {
                 let end = min(start + batchSize, orderedIDs.count)
                 let batchIDs = Array(orderedIDs[start ..< end])
+                currentBatchIDs = batchIDs
                 let batchSet = Set(batchIDs)
                 let prompt = LocalizationCursorWorkflow.buildAgentTranslationPrompt(
                     scanResult: scan,
@@ -345,6 +387,7 @@ final class LocalizationCompareViewModel {
                             let idx = max(min(completedBase + completed, orderedIDs.count) - 1, 0)
                             if orderedIDs.indices.contains(idx) {
                                 let id = orderedIDs[idx]
+                                self.selectedLanguageTab = id.languageCode
                                 self.cursorCLICurrentLocale = id.languageCode
                                 self.cursorCLICurrentKey = id.key
                                 self.cursorCLICurrentSourceText = enByID[id] ?? ""
@@ -368,18 +411,38 @@ final class LocalizationCompareViewModel {
                 for row in parsed.rows {
                     let id = LocalizationMissingEntryID(languageCode: row.locale, key: row.key)
                     updated[id] = row.value
+                    failedIDs.remove(id)
                 }
+                let producedIDs = Set(parsed.rows.map { LocalizationMissingEntryID(languageCode: $0.locale, key: $0.key) })
+                let missed = batchSet.subtracting(producedIDs)
+                failedIDs.formUnion(missed)
                 totalGenerated += parsed.rows.count
                 totalSkipped += parsed.skippedLineCount
+                totalMalformed += parsed.malformedLineCount
+                totalUnmatched += parsed.unmatchedLineCount
+                totalAutoCorrected += parsed.autoCorrectedLocaleCount
                 completedBase += parsed.rows.count
                 cursorCLICompletedCount = min(completedBase, cursorCLITotalCount)
                 translatedPreviewByID = updated
             }
 
-            workflowMessage = "已分批生成 \(totalGenerated) 条 Cursor 预览；跳过 \(totalSkipped) 行。请在右侧检查后点击「应用预览到工程」。"
+            cursorCLIFailedEntryIDs = failedIDs
+            let failed = failedIDs.count
+            let skipReason = totalSkipped > 0
+                ? "（格式/字段异常 \(totalMalformed) 行，locale/key 不匹配 \(totalUnmatched) 行）"
+                : ""
+            let correctedHint = totalAutoCorrected > 0 ? "（已按 key 自动纠正 locale \(totalAutoCorrected) 行）" : ""
+            if failed > 0 {
+                workflowMessage = "已分批生成 \(totalGenerated) 条预览\(correctedHint)；跳过 \(totalSkipped) 行\(skipReason)；仍有 \(failed) 条未完成。可点「继续翻译未完成」。"
+            } else {
+                workflowMessage = "已分批生成 \(totalGenerated) 条 Cursor 预览\(correctedHint)；跳过 \(totalSkipped) 行\(skipReason)。请在右侧检查后点击「应用预览到工程」。"
+            }
         } catch {
+            failedIDs.formUnion(currentBatchIDs)
+            cursorCLIFailedEntryIDs = failedIDs
             translatedPreviewByID = updated
-            workflowMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            let errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            workflowMessage = "\(errorText)\n可点击「继续翻译未完成」重试剩余条目（\(failedIDs.count) 条）。"
         }
     }
     
@@ -627,6 +690,7 @@ final class LocalizationCompareViewModel {
                 coordinator: onDeviceCoordinator,
                 onProgress: { progress in
                     Task { @MainActor in
+                        self.selectedLanguageTab = progress.locale
                         self.machineTranslationTotalCount = progress.total
                         self.machineTranslationCompletedCount = progress.completed
                         self.machineTranslationCurrentLocale = progress.locale

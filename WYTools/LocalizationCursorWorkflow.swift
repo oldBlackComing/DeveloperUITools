@@ -437,6 +437,9 @@ agent --trust -p "$1"
     struct ParsedJSONLPreview: Sendable {
         let rows: [(locale: String, key: String, value: String)]
         let skippedLineCount: Int
+        let malformedLineCount: Int
+        let unmatchedLineCount: Int
+        let autoCorrectedLocaleCount: Int
     }
 
     /// 仅解析 JSONL 为预览行（不写文件）。
@@ -447,34 +450,101 @@ agent --trust -p "$1"
         var rows: [(locale: String, key: String, value: String)] = []
         rows.reserveCapacity(selected.count)
         var skipped = 0
+        var malformed = 0
+        var unmatched = 0
+        var corrected = 0
+        var localesByKey: [String: Set<String>] = [:]
+        localesByKey.reserveCapacity(selected.count)
+        for id in selected {
+            localesByKey[id.key, default: []].insert(id.languageCode)
+        }
 
         for rawLine in text.split(whereSeparator: \.isNewline) {
             let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
             if line.isEmpty || line.hasPrefix("//") { continue }
-            guard let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let loc = obj["locale"] as? String,
-                  let key = obj["key"] as? String,
-                  let value = obj["value"] as? String
+            guard let parsed = parseLocaleKeyValueLine(line)
             else {
                 skipped += 1
+                malformed += 1
                 continue
             }
 
+            let loc = parsed.locale
+            let key = parsed.key
+            let value = parsed.value
             let keyN = key.precomposedStringWithCanonicalMapping
-            guard let match = selected.first(where: {
+            if let match = selected.first(where: {
                 $0.key == keyN && $0.languageCode.caseInsensitiveCompare(loc) == .orderedSame
-            }) else {
-                skipped += 1
+            }) {
+                rows.append((locale: match.languageCode, key: keyN, value: value))
                 continue
             }
-            rows.append((locale: match.languageCode, key: keyN, value: value))
+
+            // 容错：若 locale 错了，但该 key 在当前选集中只属于一个 locale，则自动纠正。
+            if let localeSet = localesByKey[keyN], localeSet.count == 1, let fixedLocale = localeSet.first {
+                let correctedID = LocalizationMissingEntryID(languageCode: fixedLocale, key: keyN)
+                if selected.contains(correctedID) {
+                    rows.append((locale: fixedLocale, key: keyN, value: value))
+                    corrected += 1
+                    continue
+                }
+            }
+
+            skipped += 1
+            unmatched += 1
+            continue
         }
 
         if rows.isEmpty {
             throw AppendError.noValidLines
         }
-        return ParsedJSONLPreview(rows: rows, skippedLineCount: skipped)
+        return ParsedJSONLPreview(
+            rows: rows,
+            skippedLineCount: skipped,
+            malformedLineCount: malformed,
+            unmatchedLineCount: unmatched,
+            autoCorrectedLocaleCount: corrected
+        )
+    }
+
+    /// 兼容两类行：
+    /// 1) 严格 JSON（双引号）
+    /// 2) JSON-like（单引号，如 {'locale':'nl','key':'...','value':'...'}）
+    private static func parseLocaleKeyValueLine(_ raw: String) -> (locale: String, key: String, value: String)? {
+        var line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if line.hasPrefix("[") && line.hasSuffix("]"), line.count >= 2 {
+            line.removeFirst()
+            line.removeLast()
+            line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if let data = line.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let loc = obj["locale"] as? String,
+           let key = obj["key"] as? String,
+           let value = obj["value"] as? String {
+            return (loc, key, value)
+        }
+
+        let pattern = #"^\{\s*['"]locale['"]\s*:\s*(['"])(.*?)\1\s*,\s*['"]key['"]\s*:\s*(['"])(.*?)\3\s*,\s*['"]value['"]\s*:\s*(['"])(.*?)\5\s*\}$"#
+        guard let re = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        let ns = line as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        guard let m = re.firstMatch(in: line, options: [], range: range), m.numberOfRanges >= 7 else { return nil }
+
+        let locale = ns.substring(with: m.range(at: 2))
+        let key = unescapeLooseJSONLikeField(ns.substring(with: m.range(at: 4)))
+        let value = unescapeLooseJSONLikeField(ns.substring(with: m.range(at: 6)))
+        return (locale, key, value)
+    }
+
+    private static func unescapeLooseJSONLikeField(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\\\", with: "\\")
+            .replacingOccurrences(of: "\\\"", with: "\"")
+            .replacingOccurrences(of: "\\'", with: "'")
+            .replacingOccurrences(of: "\\n", with: "\n")
+            .replacingOccurrences(of: "\\r", with: "\r")
+            .replacingOccurrences(of: "\\t", with: "\t")
     }
 
     /// 解析 JSONL，将 `locale`+`key` 在 `selected` 中的条目追加到对应语言的主 `Localizable.strings` 末尾。
