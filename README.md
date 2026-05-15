@@ -10,6 +10,9 @@
 | **图片压缩（Tinify）** | 通过 [Tinify](https://tinypng.com/developers)（与 TinyPNG 同源）压缩图片；支持队列、多 API Key 轮换、拖放与导出。需在界面中填写从 tinypng.com 获取的 API Key。 |
 | **文本行对比** | 将两段文本按行拆分，对比仅出现在 A、仅出现在 B 以及两侧共有的行，可选忽略大小写与空行。 |
 | **Lottie 预览** | 拖入 `lottie.json` 或 `.lottie` 文件预览；支持播放/暂停、帧跳转与进度条、画布背景色、当前帧导出 PNG；内置 DEMO。 |
+| **本地化对比（Localization vs EN）** | 对比本地化文案与英文基准，定位缺失/差异项。 |
+| **iOS 上传预检（体验版）** | 对 iOS 工程执行上传前检查（签名、构建、导出等），在本地提前暴露风险。 |
+| **仓库批量更新** | 批量更新目录下仓库分支，支持“仅更新有变化分支”、小黑屋、冲突/本地改动拦截、SourceTree 打开并处理后继续。 |
 
 侧边栏工具顺序支持拖拽调整，并会持久化到本机 `UserDefaults`。
 
@@ -37,6 +40,32 @@ cd /path/to/WYTools
 xcodebuild -scheme WYTools -destination 'platform=macOS' build
 ```
 
+## 仓库批量更新 使用说明
+
+1. 在侧边栏进入 `仓库批量更新`。
+2. 选择项目根目录（如 `~/Desktop/iOS`），点击 `Scan Repositories`。
+3. 选择仓库后点击 `Start Update`。
+4. 运行过程中可点击 `Stop` 停止（准备阶段与执行阶段都可响应）。
+
+### 关键行为说明
+
+- 更新前会先做分支检测，仅对“落后远端”的分支发起 `pull`，避免全量无效拉取。
+- 无 remote / 不可更新仓库会标记并跳过，不会阻断整批任务。
+- 检测到冲突或本地未提交改动时，会进入人工处理态：
+  - 可一键 `Open in SourceTree`
+  - 处理完成后点击“处理完成，继续”恢复任务
+  - 提示包含具体分支与变更明细（用于快速定位）
+- 提供仓库卡片快捷按钮：`Open Folder`、`Open SourceTree`。
+- `Included / Black Room` 独立列表，小黑屋持久化保存。
+- 操作栏支持滚动吸顶，长列表更新更顺手。
+
+## 日志与性能
+
+- 批量更新采用日志缓冲刷新（默认约 150ms 批量刷新）。
+- 日志总行数有上限（防止无限增长）。
+- UI 仅显示最近日志（默认最近 300 行），并对超长单行自动截断。
+- 运行中降低日志渲染复杂度，减少主线程卡顿风险。
+
 ## 项目结构
 
 ```
@@ -48,7 +77,11 @@ WYTools/
 ├── ImageCompressToolView.swift
 ├── TinifyClient.swift        # Tinify HTTP 客户端
 ├── LineDiffToolView.swift
-└── LottieToolView.swift      # Lottie 预览（AppKit 宿主 + SwiftUI）
+├── LottieToolView.swift      # Lottie 预览（AppKit 宿主 + SwiftUI）
+├── LocalizationCompare*.swift
+├── IOSUploadPrecheck*.swift
+├── RepoBulkUpdateToolView.swift
+└── RepoBulkUpdateManager.swift
 WYTools.xcodeproj/            # Xcode 工程
 ```
 
@@ -56,6 +89,7 @@ WYTools.xcodeproj/            # Xcode 工程
 
 - **JSON 格式化 / 文本行对比 / Lottie 预览**：不主动上传数据；Lottie 若使用外链图片需资源已内嵌（界面内有说明）。
 - **图片压缩**：仅在你点击开始压缩时，将图片数据发送至 Tinify 官方接口；API Key 可保存在本机（见应用内选项）。
+- **仓库批量更新**：仅执行本地 Git 与已配置远端交互（fetch/pull）；不依赖第三方业务 API。打开 SourceTree 为本机应用拉起行为。
 
 ## 许可证
 

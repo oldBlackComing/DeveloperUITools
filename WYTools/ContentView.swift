@@ -13,12 +13,14 @@ private enum ToolTab: String, CaseIterable, Identifiable, Hashable {
     case imageCompress = "图片压缩"
     case lottie = "Lottie 预览"
     case localizationCompare = "本地化对比（Localization vs EN）"
+    case iosUploadPrecheck = "iOS 上传预检"
+    case repoBulkUpdate = "仓库批量更新"
 
     private static let sidebarOrderKey = "sidebar_tool_tab_order"
 
     /// 默认顺序：JSON 格式化 → 图片压缩 → 文本行对比 → Lottie 预览 → 本地化对比（Localization vs EN）
     static var defaultTabOrder: [ToolTab] {
-        [.jsonFormat, .imageCompress, .lineDiff, .lottie, .localizationCompare]
+        [.jsonFormat, .imageCompress, .lineDiff, .lottie, .localizationCompare, .iosUploadPrecheck, .repoBulkUpdate]
     }
 
     var id: String { rawValue }
@@ -30,6 +32,8 @@ private enum ToolTab: String, CaseIterable, Identifiable, Hashable {
         case .imageCompress: "photo.on.rectangle.angled"
         case .lottie: "play.rectangle.fill"
         case .localizationCompare: "globe"
+        case .iosUploadPrecheck: "checkmark.shield"
+        case .repoBulkUpdate: "arrow.triangle.branch"
         }
     }
 
@@ -95,6 +99,10 @@ struct ContentView: View {
                         LottieToolView()
                     case .localizationCompare:
                         LocalizationCompareToolView()
+                    case .iosUploadPrecheck:
+                        IOSUploadPrecheckToolView()
+                    case .repoBulkUpdate:
+                        RepoBulkUpdateToolView()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -107,35 +115,62 @@ struct ContentView: View {
     @ViewBuilder
     private func sidebarRow(_ tab: ToolTab) -> some View {
         let isSelected = tab == selection
-        Label(tab.rawValue, systemImage: tab.systemImage)
-            .foregroundStyle(isSelected ? DiffToolTheme.text : DiffToolTheme.muted)
-            .fontWeight(isSelected ? .semibold : .regular)
-            .padding(.vertical, 7)
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    DiffToolTheme.accent.opacity(0.28),
-                                    DiffToolTheme.accent.opacity(0.12),
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(
-                                    Color(red: 129 / 255, green: 140 / 255, blue: 248 / 255).opacity(0.65),
-                                    lineWidth: 1
-                                )
-                        )
-                }
+        HStack(spacing: 8) {
+            Label(tab.rawValue, systemImage: tab.systemImage)
+                .lineLimit(1)
+            if let badge = statusBadgeTitle(for: tab) {
+                Text(badge)
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(DiffToolTheme.onlyA.opacity(0.2))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(DiffToolTheme.onlyA.opacity(0.55), lineWidth: 1)
+                    )
+                    .foregroundStyle(DiffToolTheme.onlyA)
             }
-            .contentShape(Rectangle())
+        }
+        .foregroundStyle(isSelected ? DiffToolTheme.text : DiffToolTheme.muted)
+        .fontWeight(isSelected ? .semibold : .regular)
+        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                DiffToolTheme.accent.opacity(0.28),
+                                DiffToolTheme.accent.opacity(0.12),
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(
+                                Color(red: 129 / 255, green: 140 / 255, blue: 248 / 255).opacity(0.65),
+                                lineWidth: 1
+                            )
+                    )
+            }
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func statusBadgeTitle(for tab: ToolTab) -> String? {
+        switch tab {
+        case .iosUploadPrecheck:
+            return "体验版"
+        default:
+            return nil
+        }
     }
 }
 
